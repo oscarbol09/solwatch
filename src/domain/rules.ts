@@ -13,12 +13,23 @@ export type RuleEvaluationResult =
   | { readonly matched: true; readonly matchedRuleId: RuleId; readonly reason: string }
   | { readonly matched: false; readonly matchedRuleId: null; readonly reason: string };
 
-export class CooldownTracker {
+export interface CooldownStore {
+  isOnCooldown(
+    wallet: WalletAddress,
+    eventType: EventType,
+    cooldownSeconds: number,
+    nowMs: number,
+    ruleId?: RuleId,
+  ): boolean;
+  record(wallet: WalletAddress, eventType: EventType, nowMs: number, ruleId?: RuleId): void;
+}
+
+export class CooldownTracker implements CooldownStore {
   private static readonly MAX_ENTRIES = 10_000;
   private readonly lastTriggeredMs = new Map<string, number>();
 
-  private key(wallet: WalletAddress, eventType: EventType): string {
-    return `${wallet}:${eventType}`;
+  private key(wallet: WalletAddress, eventType: EventType, ruleId?: RuleId): string {
+    return ruleId ? `${ruleId}:${wallet}:${eventType}` : `${wallet}:${eventType}`;
   }
 
   isOnCooldown(
@@ -26,15 +37,18 @@ export class CooldownTracker {
     eventType: EventType,
     cooldownSeconds: number,
     nowMs: number,
+    ruleId?: RuleId,
   ): boolean {
     if (cooldownSeconds <= 0) return false;
-    const prev = this.lastTriggeredMs.get(this.key(wallet, eventType));
+    const prev =
+      this.lastTriggeredMs.get(this.key(wallet, eventType, ruleId)) ??
+      (ruleId !== undefined ? this.lastTriggeredMs.get(this.key(wallet, eventType)) : undefined);
     if (prev === undefined) return false;
     return nowMs - prev < cooldownSeconds * 1_000;
   }
 
-  record(wallet: WalletAddress, eventType: EventType, nowMs: number): void {
-    const mapKey = this.key(wallet, eventType);
+  record(wallet: WalletAddress, eventType: EventType, nowMs: number, ruleId?: RuleId): void {
+    const mapKey = this.key(wallet, eventType, ruleId);
     if (this.lastTriggeredMs.has(mapKey)) {
       this.lastTriggeredMs.delete(mapKey);
     } else if (this.lastTriggeredMs.size >= CooldownTracker.MAX_ENTRIES) {
@@ -68,7 +82,7 @@ function checkMintFilters(
 function evaluateSingleRule(
   event: OnChainEvent,
   rule: AlertRule,
-  cooldownTracker: CooldownTracker,
+  cooldownStore: CooldownStore,
   nowMs: number,
 ): string | null {
   if (!event.success && !rule.includeFailed) {
@@ -77,7 +91,7 @@ function evaluateSingleRule(
   if (rule.eventTypes.length > 0 && !rule.eventTypes.includes(event.kind)) {
     return "event_type_filtered";
   }
-  if (cooldownTracker.isOnCooldown(event.wallet, event.kind, rule.cooldownSeconds, nowMs)) {
+  if (cooldownStore.isOnCooldown(event.wallet, event.kind, rule.cooldownSeconds, nowMs, rule.id)) {
     return "cooldown_active";
   }
 
@@ -113,7 +127,7 @@ function evaluateSingleRule(
 export function evaluateAlertRules(
   event: OnChainEvent,
   rules: readonly AlertRule[],
-  cooldownTracker: CooldownTracker,
+  cooldownStore: CooldownStore,
   nowMs: number = Date.now(),
 ): RuleEvaluationResult {
   const enabledRules = rules.filter((r) => r.enabled);
@@ -129,7 +143,7 @@ export function evaluateAlertRules(
 
   let lastRejectReason = "no_rule_matched";
   for (const rule of applicable) {
-    const rejectReason = evaluateSingleRule(event, rule, cooldownTracker, nowMs);
+    const rejectReason = evaluateSingleRule(event, rule, cooldownStore, nowMs);
     if (rejectReason === null) {
       return { matched: true, matchedRuleId: rule.id, reason: "matched" };
     }

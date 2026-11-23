@@ -60,7 +60,7 @@ function setupApiTestEnv(options: { apiToken?: string; heliusSecret?: string } =
     logger: createLogger("silent"),
   });
 
-  return { app, store, delivered };
+  return { app, store, delivered, service };
 }
 
 describe("HTTP API server (Hono)", () => {
@@ -132,7 +132,9 @@ describe("HTTP API server (Hono)", () => {
   });
 
   it("authenticates Helius webhooks and routes matching events into MonitorService", async () => {
-    const { app, store, delivered } = setupApiTestEnv({ heliusSecret: "helius-hook-secret" });
+    const { app, store, delivered, service } = setupApiTestEnv({
+      heliusSecret: "helius-hook-secret",
+    });
     store.createWallet(walletA, "Treasury");
 
     const unauth = await app.request("/webhooks/helius", {
@@ -142,18 +144,32 @@ describe("HTTP API server (Hono)", () => {
     });
     expect(unauth.status).toBe(401);
 
+    const payloadWithOneBadTx = [
+      ...HELIUS_WEBHOOK_FIXTURE,
+      { signature: "invalid-tx", slot: "not-a-number" },
+    ];
+
     const okRes = await app.request("/webhooks/helius", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: "helius-hook-secret",
       },
-      body: JSON.stringify(HELIUS_WEBHOOK_FIXTURE),
+      body: JSON.stringify(payloadWithOneBadTx),
     });
-    expect(okRes.status).toBe(200);
-    const body = (await okRes.json()) as { accepted: number; alertsDispatched: number };
+    expect(okRes.status).toBe(202);
+    const body = (await okRes.json()) as {
+      accepted: number;
+      queued: number;
+      dropped: number;
+      skippedInvalid: number;
+    };
     expect(body.accepted).toBe(3);
-    expect(body.alertsDispatched).toBe(3);
+    expect(body.queued).toBe(3);
+    expect(body.dropped).toBe(0);
+    expect(body.skippedInvalid).toBe(1);
+
+    await service.drain();
     expect(delivered).toHaveLength(3);
 
     const alertsRes = await app.request(`/api/alerts?limit=10&wallet=${WATCHED_WALLET_A}`);

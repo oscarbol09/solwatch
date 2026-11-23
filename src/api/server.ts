@@ -7,23 +7,25 @@ import { AppError, AuthError, NotFoundError, ValidationError } from "../domain/e
 import { parseWalletAddress, type SolanaCluster, type WalletAddress } from "../domain/types.js";
 import type { AppLogger } from "../logger.js";
 import type { MonitorService } from "../service/monitorService.js";
-import { parseHeliusWebhookPayload } from "../solana/heliusAdapter.js";
+import { parseHeliusWebhookBatch } from "../solana/heliusAdapter.js";
+import type { WatcherStatus } from "../solana/watcher.js";
 import type { SqliteStore } from "../store/sqliteStore.js";
 
 export type ApiServerOptions = {
   readonly service: MonitorService;
   readonly store: SqliteStore;
   readonly cluster: SolanaCluster;
-  readonly apiToken: string | undefined;
-  readonly heliusWebhookSecret: string | undefined;
-  readonly getWatcherStatus: () => {
-    readonly running: boolean;
-    readonly watchedCount: number;
-    readonly reconnectsTotal: number;
-  };
+  readonly apiToken?: string | undefined;
+  readonly heliusWebhookSecret?: string | undefined;
+  readonly getWatcherStatus: () => Pick<
+    WatcherStatus,
+    "running" | "watchedCount" | "reconnectsTotal"
+  > &
+    Partial<WatcherStatus>;
   readonly channels: readonly string[];
   readonly logger: AppLogger;
   readonly startedAtMs?: number | undefined;
+  readonly shutdownSignal?: AbortSignal | undefined;
 };
 
 const CreateWalletBodySchema = z.object({
@@ -77,12 +79,11 @@ export function createApiApp(options: ApiServerOptions): Hono {
   });
 
   app.get("/healthz", (c) => {
-    const wallets = options.store.listWallets();
     return c.json({
       status: "ok",
       uptimeSec: Math.floor((Date.now() - startedAtMs) / 1_000),
       cluster: options.cluster,
-      watchedWallets: wallets.length,
+      watchedWallets: options.store.countWallets(),
       watcher: options.getWatcherStatus(),
       channels: options.channels,
       metrics: options.service.getMetrics(),
@@ -172,21 +173,25 @@ export function createApiApp(options: ApiServerOptions): Hono {
       throw new ValidationError("Helius webhook body must be valid JSON", undefined, err);
     }
 
-    const watchedSet = new Set(options.store.listWallets(true).map((w) => w.address));
-    const events = parseHeliusWebhookPayload(rawPayload, watchedSet);
-
-    let alertsDispatched = 0;
-    for (const event of events) {
-      const outcome = await options.service.processDirectEvent(event);
-      if (outcome.status === "dispatched") {
-        alertsDispatched += 1;
-      }
+    const watchedSet = options.service.getEnabledWalletSet();
+    const { events, skippedInvalid } = parseHeliusWebhookBatch(rawPayload, watchedSet);
+    if (skippedInvalid > 0) {
+      options.logger.warn(
+        { skippedInvalid, accepted: events.length },
+        "Skipped malformed transactions in Helius webhook batch",
+      );
     }
 
-    return c.json({
-      accepted: events.length,
-      alertsDispatched,
-    });
+    const { queued, dropped } = options.service.enqueueDirectEvents(events, options.shutdownSignal);
+    return c.json(
+      {
+        accepted: events.length,
+        queued,
+        dropped,
+        skippedInvalid,
+      },
+      202,
+    );
   });
 
   return app;

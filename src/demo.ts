@@ -283,8 +283,8 @@ async function runLiveDemo(rawWallet: string): Promise<void> {
     store,
     commitment: config.solanaCommitment,
     logger,
-    onSignature: async (addr, sig, _source, signal) => {
-      await service.processSignature(addr, sig, signal);
+    onSignature: async (addr, sig, _source, signal, meta) => {
+      await service.processSignature(addr, sig, signal, meta);
     },
   });
 

@@ -192,6 +192,20 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
       logger: createLogger("silent"),
     });
     expect(await emptyDispatcher.dispatch(event, null)).toEqual([]);
+
+    expect(await dispatcher.dispatchToChannel("nonexistent", event, null, "del_missing")).toEqual({
+      channel: "nonexistent",
+      status: "failed",
+      errorMessage: 'Channel "nonexistent" is not configured',
+    });
+
+    const singleFail = await dispatcher.dispatchToChannel(
+      "discord",
+      event,
+      "Treasury",
+      "del_retry",
+    );
+    expect(singleFail.status).toBe("failed");
     store.close();
   });
 

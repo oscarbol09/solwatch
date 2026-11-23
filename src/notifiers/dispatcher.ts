@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { OnChainEvent, SolanaCluster } from "../domain/types.js";
 import type { AppLogger } from "../logger.js";
-import type { SqliteStore } from "../store/sqliteStore.js";
+import type { NewDeliveryRecord, SqliteStore } from "../store/sqliteStore.js";
 import { buildAlertEnvelope, summarizeEvent } from "./format.js";
 import type { DeliveryResult, Notifier } from "./types.js";
 
@@ -10,6 +10,11 @@ export type AlertDispatcherOptions = {
   readonly store: SqliteStore;
   readonly cluster: SolanaCluster;
   readonly logger: AppLogger;
+};
+
+export type TrackedDispatchResult = {
+  readonly deliveryId: string;
+  readonly results: readonly DeliveryResult[];
 };
 
 export class AlertDispatcher {
@@ -34,12 +39,21 @@ export class AlertDispatcher {
     walletLabel: string | null,
     signal?: AbortSignal,
   ): Promise<readonly DeliveryResult[]> {
-    const summary = summarizeEvent(event);
+    const tracked = await this.dispatchTracked(event, walletLabel, signal);
+    return tracked.results;
+  }
+
+  async dispatchTracked(
+    event: OnChainEvent,
+    walletLabel: string | null,
+    signal?: AbortSignal,
+  ): Promise<TrackedDispatchResult> {
+    const deliveryId = randomUUID();
     if (this.notifiers.length === 0) {
-      return [];
+      return { deliveryId, results: [] };
     }
 
-    const deliveryId = randomUUID();
+    const summary = summarizeEvent(event);
     const envelope = buildAlertEnvelope(event, walletLabel, this.cluster, deliveryId);
     const settled = await Promise.allSettled(
       this.notifiers.map(async (notifier) => {
@@ -49,13 +63,14 @@ export class AlertDispatcher {
     );
 
     const results: DeliveryResult[] = [];
+    const deliveryRecords: NewDeliveryRecord[] = [];
     for (let i = 0; i < this.notifiers.length; i += 1) {
       const notifier = this.notifiers[i];
       const outcome = settled[i];
       if (!notifier || !outcome) continue;
 
       if (outcome.status === "fulfilled") {
-        this.store.recordDelivery({
+        deliveryRecords.push({
           walletAddress: event.wallet,
           signature: event.signature,
           eventKind: event.kind,
@@ -68,10 +83,15 @@ export class AlertDispatcher {
         const errorMessage =
           outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
         this.logger.error(
-          { channel: notifier.channel, signature: event.signature, err: outcome.reason },
+          {
+            deliveryId,
+            channel: notifier.channel,
+            signature: event.signature,
+            err: outcome.reason,
+          },
           "Alert delivery failed",
         );
-        this.store.recordDelivery({
+        deliveryRecords.push({
           walletAddress: event.wallet,
           signature: event.signature,
           eventKind: event.kind,
@@ -84,6 +104,55 @@ export class AlertDispatcher {
       }
     }
 
-    return results;
+    this.store.recordDeliveriesBatch(deliveryRecords);
+    return { deliveryId, results };
+  }
+
+  async dispatchToChannel(
+    channelName: string,
+    event: OnChainEvent,
+    walletLabel: string | null,
+    deliveryId: string,
+    signal?: AbortSignal,
+  ): Promise<DeliveryResult> {
+    const notifier = this.notifiers.find((n) => n.channel === channelName);
+    if (!notifier) {
+      return {
+        channel: channelName,
+        status: "failed",
+        errorMessage: `Channel "${channelName}" is not configured`,
+      };
+    }
+
+    const summary = summarizeEvent(event);
+    const envelope = buildAlertEnvelope(event, walletLabel, this.cluster, deliveryId);
+    try {
+      await notifier.send(envelope, signal);
+      this.store.recordDelivery({
+        walletAddress: event.wallet,
+        signature: event.signature,
+        eventKind: event.kind,
+        summary,
+        channel: channelName,
+        status: "sent",
+      });
+      return { channel: channelName, status: "sent" };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        { deliveryId, channel: channelName, signature: event.signature, err },
+        "Outbox alert delivery retry failed",
+      );
+      this.store.recordDelivery({
+        walletAddress: event.wallet,
+        signature: event.signature,
+        eventKind: event.kind,
+        summary,
+        channel: channelName,
+        status: "failed",
+        errorMessage,
+      });
+      return { channel: channelName, status: "failed", errorMessage };
+    }
   }
 }
