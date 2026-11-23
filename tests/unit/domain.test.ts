@@ -12,6 +12,7 @@ import {
 import {
   assertNever,
   parseMintAddress,
+  parseRuleId,
   parseTxSignature,
   parseWalletAddress,
 } from "../../src/domain/types.js";
@@ -28,6 +29,8 @@ describe("domain primitives and config", () => {
       "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW";
     expect(parseTxSignature(validSig)).toBe(validSig);
     expect(() => parseTxSignature("bad-sig")).toThrow(ValidationError);
+    expect(parseRuleId("rule-1")).toBe("rule-1");
+    expect(() => parseRuleId("   ")).toThrow(ValidationError);
   });
 
   it("provides structured domain errors with status codes and retry flags", () => {
@@ -69,10 +72,30 @@ describe("domain primitives and config", () => {
     expect(redactUrlSecrets("not a url")).toBe("<invalid-url>");
   });
 
-  it("fails fast on invalid environment configuration", () => {
+  it("fails fast on invalid environment configuration and supports 1/yes/no booleans", () => {
+    const yesCfg = parseEnvConfig({
+      CONSOLE_ALERTS_ENABLED: "yes",
+      INCLUDE_FAILED_TX: "1",
+      DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/1/a",
+    });
+    expect(yesCfg.consoleAlertsEnabled).toBe(true);
+    expect(yesCfg.includeFailedTx).toBe(true);
+
     expect(() =>
       parseEnvConfig({
         SOLANA_RPC_URL: "not-a-url",
+      }),
+    ).toThrow(ValidationError);
+
+    expect(() =>
+      parseEnvConfig({
+        CONSOLE_ALERTS_ENABLED: "maybe",
+      }),
+    ).toThrow(ValidationError);
+
+    expect(() =>
+      parseEnvConfig({
+        DISCORD_WEBHOOK_URL: "not-a-url",
       }),
     ).toThrow(ValidationError);
 

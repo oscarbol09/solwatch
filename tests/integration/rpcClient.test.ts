@@ -201,4 +201,28 @@ describe("SolanaRpcClient (MSW contract tests)", () => {
     const client = new SolanaRpcClient(RPC_URL, { maxRetries: 0 });
     expect(await client.getTransaction(sigSwap)).toBeNull();
   });
+
+  it("retries transient network errors and fails immediately on caller abort", async () => {
+    let calls = 0;
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        calls += 1;
+        if (calls === 1) {
+          return HttpResponse.error();
+        }
+        const body = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ jsonrpc: "2.0", id: body.id, result: null });
+      }),
+    );
+
+    const client = new SolanaRpcClient(RPC_URL, { maxRetries: 1, sleep: async () => {} });
+    expect(await client.getTransaction(sigSwap)).toBeNull();
+    expect(calls).toBe(2);
+
+    const aborted = new AbortController();
+    aborted.abort();
+    const err = await client.getTransaction(sigSwap, aborted.signal).catch((e) => e);
+    expect(err).toBeInstanceOf(RpcError);
+    expect((err as RpcError).retryable).toBe(false);
+  });
 });

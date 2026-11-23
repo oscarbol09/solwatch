@@ -1,7 +1,15 @@
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
-import { computeBackoffDelayMs } from "../../src/domain/backoff.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  abortableSleep,
+  computeBackoffDelayMs,
+  parseRetryAfterMs,
+} from "../../src/domain/backoff.js";
 import { ValidationError } from "../../src/domain/errors.js";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("computeBackoffDelayMs", () => {
   it("computes bounded full-jitter delays deterministically with injected rng", () => {
@@ -37,5 +45,30 @@ describe("computeBackoffDelayMs", () => {
         },
       ),
     );
+  });
+
+  it("parses Retry-After numeric and HTTP-date headers safely", () => {
+    expect(parseRetryAfterMs(undefined)).toBeNull();
+    expect(parseRetryAfterMs("2.5")).toBe(2_500);
+    expect(parseRetryAfterMs("not-a-date")).toBeNull();
+
+    const futureDate = new Date(Date.now() + 5_000).toUTCString();
+    const ms = parseRetryAfterMs(futureDate);
+    expect(ms).not.toBeNull();
+    expect(ms ?? 0).toBeGreaterThanOrEqual(0);
+  });
+
+  it("resolves abortableSleep immediately on zero delay or abort signal", async () => {
+    vi.useFakeTimers();
+    await expect(abortableSleep(0)).resolves.toBeUndefined();
+
+    const preAborted = new AbortController();
+    preAborted.abort();
+    await expect(abortableSleep(10_000, preAborted.signal)).resolves.toBeUndefined();
+
+    const midController = new AbortController();
+    const pending = abortableSleep(5_000, midController.signal);
+    midController.abort();
+    await expect(pending).resolves.toBeUndefined();
   });
 });

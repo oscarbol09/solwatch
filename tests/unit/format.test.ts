@@ -14,6 +14,8 @@ import {
   makeFailedTx,
   makeIncomingSolTx,
   makeJupiterSwapTx,
+  makeOutgoingSolTx,
+  makeProgramOnlyTx,
   makeSplUsdcTransferTx,
   SIG_SOL_IN,
   WATCHED_WALLET_A,
@@ -42,18 +44,25 @@ describe("alert formatters", () => {
   });
 
   it("formats Discord embeds, JSON-safe webhook payloads, and terminal cards across all event kinds", () => {
+    const progEvent = classifyParsedTransaction(makeProgramOnlyTx(), watched);
     const events = [
       classifyParsedTransaction(makeIncomingSolTx(), watched),
+      classifyParsedTransaction(makeOutgoingSolTx(), watched),
       classifyParsedTransaction(makeSplUsdcTransferTx(), watched),
       classifyParsedTransaction(makeJupiterSwapTx(), watched),
       classifyParsedTransaction(makeFailedTx(), watched),
+      { ...progEvent, timestampSec: null },
     ];
 
     for (const [idx, event] of events.entries()) {
-      const envelope = buildAlertEnvelope(event, "Main Wallet", "mainnet-beta", `del_${idx}`);
+      const label = idx % 2 === 0 ? "Main Wallet" : null;
+      const envelope = buildAlertEnvelope(event, label, "mainnet-beta", `del_${idx}`);
       const discord = formatDiscordEmbed(envelope);
       expect(discord.embeds).toHaveLength(1);
       expect(discord.embeds[0]?.url).toBe(envelope.explorerUrl);
+
+      const html = formatTelegramHtml(envelope);
+      expect(html).toContain("Open on Solscan");
 
       const webhookBody = formatWebhookPayload(envelope);
       expect(() => JSON.stringify(webhookBody)).not.toThrow();
@@ -61,7 +70,6 @@ describe("alert formatters", () => {
       expect(webhookBody.deliveryId).toBe(`del_${idx}`);
 
       const line = formatConsoleLine(envelope);
-      expect(line).toContain("Main Wallet");
       expect(line).toContain(event.signature);
     }
   });

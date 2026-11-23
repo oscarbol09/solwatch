@@ -183,6 +183,43 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
     expect(history).toHaveLength(3);
     expect(history.filter((r) => r.status === "sent")).toHaveLength(2);
     expect(history.filter((r) => r.status === "failed")).toHaveLength(1);
+    expect(dispatcher.getChannels()).toEqual(["console", "discord", "webhook"]);
+
+    const emptyDispatcher = new AlertDispatcher({
+      notifiers: [],
+      store,
+      cluster: "mainnet-beta",
+      logger: createLogger("silent"),
+    });
+    expect(await emptyDispatcher.dispatch(event, null)).toEqual([]);
     store.close();
+  });
+
+  it("retries transient network failures and respects caller AbortSignal", async () => {
+    const url = "https://hooks.client.local/flaky";
+    let calls = 0;
+    server.use(
+      http.post(url, () => {
+        calls += 1;
+        if (calls === 1) {
+          return HttpResponse.error();
+        }
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+
+    const notifier = new WebhookNotifier({
+      url,
+      maxRetries: 1,
+      sleep: async () => {},
+    });
+    const event = classifyParsedTransaction(makeJupiterSwapTx(), watched);
+    const envelope = buildAlertEnvelope(event, null, "mainnet-beta", "del_net_1");
+    await notifier.send(envelope);
+    expect(calls).toBe(2);
+
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(notifier.send(envelope, aborted.signal)).rejects.toThrow(NotifierError);
   });
 });
