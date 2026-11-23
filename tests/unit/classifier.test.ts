@@ -85,6 +85,43 @@ describe("classifyParsedTransaction", () => {
     expect(event.tokenOut.rawAmount).toBe(45_000_000_000n);
   });
 
+  it("prioritizes real SPL swap input over small ATA rent SOL dust", () => {
+    const base = makeRaydiumTokenToTokenSwapTx();
+    const withAtaRent = {
+      ...base,
+      meta: {
+        ...base.meta,
+        // Wallet spent 1.5 USDC (1_500_000n) and 0.00203928 SOL (2_039_280n) ATA rent
+        preBalances: [2_000_000_000n, 2_000_000n, 2_000_000n],
+        postBalances: [1_997_950_720n, 2_000_000n, 2_000_000n],
+        preTokenBalances: [
+          {
+            accountIndex: 1,
+            mint: USDC_MINT,
+            owner: WATCHED_WALLET_A,
+            uiTokenAmount: { amount: "5000000", decimals: 6 },
+          },
+          ...(base.meta.preTokenBalances?.slice(1) ?? []),
+        ],
+        postTokenBalances: [
+          {
+            accountIndex: 1,
+            mint: USDC_MINT,
+            owner: WATCHED_WALLET_A,
+            uiTokenAmount: { amount: "3500000", decimals: 6 },
+          },
+          ...(base.meta.postTokenBalances?.slice(1) ?? []),
+        ],
+      },
+    };
+
+    const event = classifyParsedTransaction(withAtaRent, watched);
+    expect(event.kind).toBe("dex_swap");
+    if (event.kind !== "dex_swap") throw new Error("unexpected kind");
+    expect(event.tokenIn.mint).toBe(USDC_MINT);
+    expect(event.tokenIn.rawAmount).toBe(1_500_000n);
+  });
+
   it("does not misclassify fee-only program calls or failed transactions as SOL transfers", () => {
     const failed = classifyParsedTransaction(makeFailedTx(), watched);
     expect(failed.kind).toBe("program_interaction");

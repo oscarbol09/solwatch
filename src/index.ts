@@ -73,8 +73,8 @@ async function main(): Promise<void> {
     store,
     commitment: config.solanaCommitment,
     logger,
-    onSignature: async (wallet, signature) => {
-      await service.processSignature(wallet, signature);
+    onSignature: async (wallet, signature, _source, signal) => {
+      await service.processSignature(wallet, signature, signal);
     },
   });
   service.attachWatchControl(watcher);
@@ -130,7 +130,7 @@ async function main(): Promise<void> {
   );
 
   let shuttingDown = false;
-  const shutdown = async (signalName: string) => {
+  const shutdown = async (signalName: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info({ signal: signalName }, "Shutting down solwatch cleanly");
@@ -139,13 +139,21 @@ async function main(): Promise<void> {
       watcher.stop(),
       bot ? bot.stop() : Promise.resolve(),
       new Promise<void>((resolve) => {
+        if ("closeIdleConnections" in server && typeof server.closeIdleConnections === "function") {
+          server.closeIdleConnections();
+        }
         server.close(() => resolve());
       }),
     ]);
 
     store.close();
-    process.exit(0);
+    process.exit(exitCode);
   };
+
+  server.on("error", (err: unknown) => {
+    logger.error({ err, host: config.host, port: config.port }, "HTTP server error");
+    void shutdown("SERVER_ERROR", 1);
+  });
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

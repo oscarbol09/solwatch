@@ -102,9 +102,9 @@ export class MonitorService {
   }
 
   async removeWallet(address: WalletAddress): Promise<boolean> {
+    await this.watchControl?.unwatchWallet(address);
     const removed = this.store.removeWallet(address);
     if (removed) {
-      await this.watchControl?.unwatchWallet(address);
       this.logger.info({ wallet: address }, "Wallet removed from watchlist");
     }
     return removed;
@@ -177,7 +177,9 @@ export class MonitorService {
 
     this.cooldownTracker.record(event.wallet, event.kind, evaluationTimeMs);
     const results = await this.dispatcher.dispatch(event, walletLabel, signal);
-    this.dispatchedTotal += 1;
+    if (results.length > 0) {
+      this.dispatchedTotal += 1;
+    }
     return { status: "dispatched", results };
   }
 }

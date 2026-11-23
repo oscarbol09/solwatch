@@ -140,5 +140,8 @@ export function parseRuleId(raw: string): RuleId {
 }
 
 export function assertNever(value: never, message = "Unhandled union member"): never {
-  throw new Error(`${message}: ${JSON.stringify(value)}`);
+  const serialized = JSON.stringify(value, (_key, item: unknown) =>
+    typeof item === "bigint" ? item.toString() : item,
+  );
+  throw new Error(`${message}: ${serialized}`);
 }

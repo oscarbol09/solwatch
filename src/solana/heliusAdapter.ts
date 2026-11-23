@@ -1,9 +1,8 @@
 import { z } from "zod";
 import { ValidationError } from "../domain/errors.js";
-import { resolveTokenMetadata, shortAddress, WSOL_MINT } from "../domain/tokens.js";
+import { resolveTokenMetadata, WSOL_MINT } from "../domain/tokens.js";
 import {
   type OnChainEvent,
-  parseMintAddress,
   parseTxSignature,
   type TokenLeg,
   type TxSignature,
@@ -11,6 +10,8 @@ import {
   tryParseWalletAddress,
   type WalletAddress,
 } from "../domain/types.js";
+
+const UNSIGNED_INT_STRING = /^\d+$/;
 
 const HeliusNativeTransferSchema = z.object({
   fromUserAccount: z.string().nullable().optional(),
@@ -26,8 +27,8 @@ const HeliusTokenTransferSchema = z.object({
 });
 
 const HeliusRawTokenAmountSchema = z.object({
-  tokenAmount: z.string(),
-  decimals: z.number().int().nonnegative(),
+  tokenAmount: z.string().regex(UNSIGNED_INT_STRING, "Expected non-negative integer string"),
+  decimals: z.number().int().min(0).max(18),
 });
 
 const HeliusSwapTokenSchema = z.object({
@@ -38,13 +39,13 @@ const HeliusSwapTokenSchema = z.object({
 
 const HeliusSwapNativeSchema = z.object({
   account: z.string().optional(),
-  amount: z.string(),
+  amount: z.string().regex(UNSIGNED_INT_STRING, "Expected non-negative integer string"),
 });
 
 const HeliusTransactionSchema = z.object({
   signature: z.string(),
   slot: z.number().int().nonnegative(),
-  timestamp: z.number().int().nonnegative().nullable().optional(),
+  timestamp: z.number().int().min(0).max(8_640_000_000).nullable().optional(),
   fee: z.number().int().nonnegative().default(0),
   feePayer: z.string().optional(),
   type: z.string().default("UNKNOWN"),
@@ -70,16 +71,24 @@ const HeliusTransactionSchema = z.object({
 const HeliusPayloadSchema = z.array(HeliusTransactionSchema);
 
 type HeliusTx = z.infer<typeof HeliusTransactionSchema>;
+type HeliusSwapEvent = NonNullable<NonNullable<HeliusTx["events"]>["swap"]>;
 
-function decimalNumberToBaseUnits(value: number, decimals: number): bigint {
-  if (!Number.isFinite(value) || value <= 0) return 0n;
+function decimalNumberToBaseUnits(
+  value: number,
+  fixedDecimals: number | null,
+): { readonly rawAmount: bigint; readonly decimals: number } {
+  if (!Number.isFinite(value) || value <= 0) {
+    return { rawAmount: 0n, decimals: fixedDecimals ?? 0 };
+  }
   const plain = value.toLocaleString("en-US", {
     useGrouping: false,
-    maximumFractionDigits: decimals,
+    maximumFractionDigits: fixedDecimals ?? 9,
   });
   const [wholePart = "0", fracPart = ""] = plain.split(".");
+  const decimals = fixedDecimals ?? Math.min(9, fracPart.length);
   const paddedFrac = fracPart.slice(0, decimals).padEnd(decimals, "0");
-  return BigInt(wholePart) * 10n ** BigInt(decimals) + BigInt(paddedFrac || "0");
+  const rawAmount = BigInt(wholePart) * 10n ** BigInt(decimals) + BigInt(paddedFrac || "0");
+  return { rawAmount, decimals };
 }
 
 function collectCandidateWallets(
@@ -96,6 +105,17 @@ function collectCandidateWallets(
     if (tt.fromUserAccount) candidates.add(tt.fromUserAccount);
     if (tt.toUserAccount) candidates.add(tt.toUserAccount);
   }
+  const swap = tx.events?.swap;
+  if (swap) {
+    if (swap.nativeInput?.account) candidates.add(swap.nativeInput.account);
+    if (swap.nativeOutput?.account) candidates.add(swap.nativeOutput.account);
+    for (const ti of swap.tokenInputs ?? []) {
+      if (ti.userAccount) candidates.add(ti.userAccount);
+    }
+    for (const to of swap.tokenOutputs ?? []) {
+      if (to.userAccount) candidates.add(to.userAccount);
+    }
+  }
 
   const matched: WalletAddress[] = [];
   for (const candidate of candidates) {
@@ -105,6 +125,22 @@ function collectCandidateWallets(
     }
   }
   return matched;
+}
+
+function isWalletSwapOwner(tx: HeliusTx, swap: HeliusSwapEvent, wallet: WalletAddress): boolean {
+  const explicitOwners = new Set<string>();
+  if (swap.nativeInput?.account) explicitOwners.add(swap.nativeInput.account);
+  if (swap.nativeOutput?.account) explicitOwners.add(swap.nativeOutput.account);
+  for (const leg of swap.tokenInputs ?? []) {
+    if (leg.userAccount) explicitOwners.add(leg.userAccount);
+  }
+  for (const leg of swap.tokenOutputs ?? []) {
+    if (leg.userAccount) explicitOwners.add(leg.userAccount);
+  }
+  if (explicitOwners.size > 0) {
+    return explicitOwners.has(wallet);
+  }
+  return tx.feePayer === wallet;
 }
 
 function buildSwapLegFromHelius(
@@ -128,7 +164,7 @@ function buildSwapLegFromHelius(
     mint,
     symbol: meta.symbol,
     rawAmount: BigInt(firstToken.rawTokenAmount.tokenAmount),
-    decimals: meta.decimals ?? firstToken.rawTokenAmount.decimals,
+    decimals: firstToken.rawTokenAmount.decimals,
   };
 }
 
@@ -157,7 +193,7 @@ function mapHeliusTxForWallet(
   }
 
   const swap = tx.events?.swap;
-  if (tx.type === "SWAP" && swap) {
+  if (tx.type === "SWAP" && swap && isWalletSwapOwner(tx, swap, wallet)) {
     const tokenIn = buildSwapLegFromHelius(swap.nativeInput, swap.tokenInputs);
     const tokenOut = buildSwapLegFromHelius(swap.nativeOutput, swap.tokenOutputs);
     if (tokenIn && tokenOut) {
@@ -177,14 +213,15 @@ function mapHeliusTxForWallet(
     }
   }
 
-  const tokenTransfer = (tx.tokenTransfers ?? []).find(
-    (tt) => tt.toUserAccount === wallet || tt.fromUserAccount === wallet,
-  );
-  if (tokenTransfer) {
-    const mint = parseMintAddress(tokenTransfer.mint);
+  for (const tt of tx.tokenTransfers ?? []) {
+    if (tt.tokenAmount <= 0) continue;
+    if (tt.toUserAccount !== wallet && tt.fromUserAccount !== wallet) continue;
+    const mint = tryParseMintAddress(tt.mint);
+    if (mint === null) continue;
+
     const resolved = resolveTokenMetadata(mint);
-    const decimals = resolved.decimals ?? 6;
-    const isIncoming = tokenTransfer.toUserAccount === wallet;
+    const converted = decimalNumberToBaseUnits(tt.tokenAmount, resolved.decimals);
+    const isIncoming = tt.toUserAccount === wallet;
     return {
       kind: "spl_transfer",
       signature,
@@ -194,11 +231,9 @@ function mapHeliusTxForWallet(
       direction: isIncoming ? "in" : "out",
       mint,
       symbol: resolved.symbol,
-      rawAmount: decimalNumberToBaseUnits(tokenTransfer.tokenAmount, decimals),
-      decimals,
-      counterparty: isIncoming
-        ? (tokenTransfer.fromUserAccount ?? null)
-        : (tokenTransfer.toUserAccount ?? null),
+      rawAmount: converted.rawAmount,
+      decimals: converted.decimals,
+      counterparty: isIncoming ? (tt.fromUserAccount ?? null) : (tt.toUserAccount ?? null),
       feeLamports,
       success: true,
     };
@@ -232,7 +267,7 @@ function mapHeliusTxForWallet(
     timestampSec,
     wallet,
     programIds: [tx.source],
-    summary: tx.description ?? `${tx.type} on ${shortAddress(tx.source)}`,
+    summary: tx.description ?? `${tx.type} on ${tx.source}`,
     feeLamports,
     success: true,
   };

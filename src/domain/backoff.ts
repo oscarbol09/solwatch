@@ -28,15 +28,20 @@ export function computeBackoffDelayMs(
   return Math.floor(ceiling * clampedRng);
 }
 
+export const MAX_RETRY_AFTER_MS = 60_000;
+
 export function parseRetryAfterMs(headerValue: string | null | undefined): number | null {
   if (!headerValue) return null;
   const trimmed = headerValue.trim();
   if (/^\d+(\.\d+)?$/.test(trimmed)) {
-    return Math.max(0, Math.ceil(Number(trimmed) * 1_000));
+    const rawMs = Math.ceil(Number(trimmed) * 1_000);
+    return Number.isFinite(rawMs)
+      ? Math.min(MAX_RETRY_AFTER_MS, Math.max(0, rawMs))
+      : MAX_RETRY_AFTER_MS;
   }
   const parsedDate = Date.parse(trimmed);
   if (!Number.isNaN(parsedDate)) {
-    return Math.max(0, parsedDate - Date.now());
+    return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, parsedDate - Date.now()));
   }
   return null;
 }

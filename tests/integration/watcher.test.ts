@@ -134,14 +134,16 @@ describe("SolanaWatcher", () => {
     vi.useRealTimers();
   });
 
-  it("streams notifications, reconnects with backoff on channel close, and backfills missed txs chronologically", async () => {
+  it("backfills missed txs chronologically when a cursor exists and skips pre-watch history on new quiet wallets", async () => {
     vi.useFakeTimers();
     const store = new SqliteStore(":memory:");
     store.createWallet(walletA, "Treasury");
     store.updateLastSignature(walletA, sig1);
+    store.createWallet(walletB, "NewQuiet");
 
     const subs = createFakeSubscriptionPort();
-    // RPC returns newest-first [sig3, sig2] after lastSignature sig1
+    // RPC returns newest-first [sig3, sig2] after lastSignature sig1 for walletA,
+    // and historical signatures for walletB that predate watching.
     const rpc = makeStubRpc(
       new Map([
         [
@@ -151,6 +153,7 @@ describe("SolanaWatcher", () => {
             { signature: sig2, slot: 102n, err: null },
           ],
         ],
+        [walletB, [{ signature: sig4, slot: 50n, err: null }]],
       ]),
     );
 
@@ -163,7 +166,8 @@ describe("SolanaWatcher", () => {
       logger: createLogger("silent"),
       backoff: { baseMs: 1_000, maxMs: 5_000 },
       rng: () => 0.5,
-      onSignature: async (wallet, signature, source) => {
+      onSignature: async (wallet, signature, source, signal) => {
+        expect(signal.aborted).toBe(false);
         seen.push({ wallet, signature, source });
       },
     });
@@ -171,34 +175,39 @@ describe("SolanaWatcher", () => {
     await watcher.start();
     await vi.advanceTimersByTimeAsync(10);
     expect(subs.getQueues(walletA)).toHaveLength(1);
+    expect(subs.getQueues(walletB)).toHaveLength(1);
 
-    // Emit one live event before disconnect
-    subs.getQueues(walletA)[0]?.push({ signature: sig1, slot: 101n, err: null });
-    await vi.advanceTimersByTimeAsync(10);
-    expect(seen).toEqual([{ wallet: walletA, signature: sig1, source: "websocket" }]);
-
-    // Simulate WS channel drop
-    subs
-      .getQueues(walletA)[0]
-      ?.fail(new SolanaError(SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_CONNECTION_CLOSED));
-
-    // Advance past 500ms backoff (1000 * 2^0 * 0.5)
-    await vi.advanceTimersByTimeAsync(600);
-
-    expect(subs.getQueues(walletA)).toHaveLength(2);
-    expect(watcher.getStatus().reconnectsTotal).toBe(1);
-
-    // Verify chronological backfill (sig2 before sig3)
+    // Persisted cursor on walletA backfills [sig2, sig3] on startup/reconnect;
+    // brand-new walletB (lastSignature === null) must NOT replay historical sig4.
     expect(seen).toEqual([
-      { wallet: walletA, signature: sig1, source: "websocket" },
       { wallet: walletA, signature: sig2, source: "backfill" },
       { wallet: walletA, signature: sig3, source: "backfill" },
     ]);
 
-    // Subsequent live event after reconnect
+    // Simulate live WS notification advancing cursor
+    subs.getQueues(walletA)[0]?.push({ signature: sig1, slot: 101n, err: null });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(seen[2]).toEqual({ wallet: walletA, signature: sig1, source: "websocket" });
+
+    // Drop both WS channels and verify reconnect backoff + no historical blast on walletB
+    subs
+      .getQueues(walletA)[0]
+      ?.fail(new SolanaError(SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_CONNECTION_CLOSED));
+    subs
+      .getQueues(walletB)[0]
+      ?.fail(new SolanaError(SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_CONNECTION_CLOSED));
+
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(subs.getQueues(walletA)).toHaveLength(2);
+    expect(subs.getQueues(walletB)).toHaveLength(2);
+    expect(watcher.getStatus().reconnectsTotal).toBe(2);
+    expect(seen.some((item) => item.wallet === walletB)).toBe(false);
+
+    // Subsequent live event after reconnect on walletA
     subs.getQueues(walletA)[1]?.push({ signature: sig4, slot: 104n, err: null });
     await vi.advanceTimersByTimeAsync(10);
-    expect(seen[3]).toEqual({ wallet: walletA, signature: sig4, source: "websocket" });
+    expect(seen.at(-1)).toEqual({ wallet: walletA, signature: sig4, source: "websocket" });
 
     await watcher.stop();
     expect(watcher.getStatus().running).toBe(false);

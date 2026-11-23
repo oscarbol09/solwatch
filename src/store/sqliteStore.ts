@@ -165,30 +165,6 @@ export class SqliteStore {
     return created;
   }
 
-  upsertWallet(
-    address: WalletAddress,
-    label: string | null = null,
-    enabled: boolean = true,
-  ): WatchedWallet {
-    const timestamp = this.now().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO watched_wallets (address, label, enabled, last_signature, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, ?, ?)
-         ON CONFLICT(address) DO UPDATE SET
-           label = COALESCE(excluded.label, watched_wallets.label),
-           enabled = excluded.enabled,
-           updated_at = excluded.updated_at`,
-      )
-      .run(address, label, enabled ? 1 : 0, timestamp, timestamp);
-
-    const saved = this.getWallet(address);
-    if (!saved) {
-      throw new Error(`Failed to reload wallet ${address} after upsert`);
-    }
-    return saved;
-  }
-
   removeWallet(address: WalletAddress): boolean {
     const result = this.db.prepare("DELETE FROM watched_wallets WHERE address = ?").run(address);
     return Number(result.changes) > 0;
@@ -268,8 +244,9 @@ export class SqliteStore {
     const timestamp = this.now().toISOString();
     const result = this.db
       .prepare(
-        `INSERT OR IGNORE INTO processed_signatures (wallet_address, signature, slot, event_kind, processed_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO processed_signatures (wallet_address, signature, slot, event_kind, processed_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(wallet_address, signature) DO NOTHING`,
       )
       .run(wallet, signature, slot.toString(), eventKind, timestamp);
     return Number(result.changes) === 1;

@@ -62,7 +62,7 @@ describe("SqliteStore", () => {
 
   it("stores and restores BigInt lamports > MAX_SAFE_INTEGER and rule mint filters accurately", () => {
     const store = new SqliteStore(":memory:");
-    store.upsertWallet(walletA, "Whale");
+    store.createWallet(walletA, "Whale");
 
     const hugeLamports = 18_446_744_073_709_551_615n;
     store.upsertRule({
@@ -89,7 +89,7 @@ describe("SqliteStore", () => {
 
   it("records multi-channel alert deliveries and returns newest alerts first", () => {
     const store = new SqliteStore(":memory:");
-    store.upsertWallet(walletA, "Main");
+    store.createWallet(walletA, "Main");
 
     store.recordDelivery({
       walletAddress: walletA,

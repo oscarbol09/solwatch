@@ -62,9 +62,102 @@ describe("parseHeliusWebhookPayload", () => {
     expect(failedEvents[0]?.kind).toBe("program_interaction");
   });
 
-  it("throws ValidationError on malformed webhook payload", () => {
+  it("throws ValidationError on malformed webhook payload or non-integer swap amounts", () => {
     expect(() => parseHeliusWebhookPayload({ invalid: true }, new Set([watched]))).toThrow(
       ValidationError,
     );
+
+    expect(() =>
+      parseHeliusWebhookPayload(
+        [
+          {
+            signature: SIG_FAILED_TX,
+            slot: 100,
+            type: "SWAP",
+            feePayer: WATCHED_WALLET_A,
+            events: {
+              swap: {
+                nativeInput: { account: WATCHED_WALLET_A, amount: "1.5" },
+              },
+            },
+          },
+        ],
+        new Set([watched]),
+      ),
+    ).toThrow(ValidationError);
+
+    expect(() =>
+      parseHeliusWebhookPayload(
+        [
+          {
+            signature: SIG_FAILED_TX,
+            slot: 100,
+            type: "SWAP",
+            feePayer: WATCHED_WALLET_A,
+            events: {
+              swap: {
+                tokenInputs: [
+                  {
+                    userAccount: WATCHED_WALLET_A,
+                    mint: USDC_MINT,
+                    rawTokenAmount: { tokenAmount: "100", decimals: 99 },
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        new Set([watched]),
+      ),
+    ).toThrow(ValidationError);
+  });
+
+  it("checks swap ownership and skips zero-amount token transfers", () => {
+    const counterparty = "GsbwXfJraMomNxBcjYLcG3mxkBUiyWXAB32fGbSQQRJe";
+    const watchedCounterparty = parseWalletAddress(counterparty);
+
+    const events = parseHeliusWebhookPayload(
+      [
+        {
+          signature: SIG_FAILED_TX,
+          slot: 200,
+          timestamp: 1_760_000_000,
+          fee: 5_000,
+          feePayer: counterparty,
+          type: "SWAP",
+          source: "JUPITER",
+          nativeTransfers: [
+            { fromUserAccount: counterparty, toUserAccount: WATCHED_WALLET_A, amount: 500_000_000 },
+          ],
+          tokenTransfers: [
+            {
+              fromUserAccount: counterparty,
+              toUserAccount: WATCHED_WALLET_A,
+              mint: USDC_MINT,
+              tokenAmount: 0,
+            },
+          ],
+          events: {
+            swap: {
+              nativeInput: { account: WATCHED_WALLET_A, amount: "1500000000" },
+              tokenOutputs: [
+                {
+                  userAccount: WATCHED_WALLET_A,
+                  mint: USDC_MINT,
+                  rawTokenAmount: { tokenAmount: "240000000", decimals: 6 },
+                },
+              ],
+            },
+          },
+        },
+      ],
+      new Set([watched, watchedCounterparty]),
+    );
+
+    const forSwapper = events.find((e) => e.wallet === watched);
+    const forOther = events.find((e) => e.wallet === watchedCounterparty);
+    expect(forSwapper?.kind).toBe("dex_swap");
+    // Counterparty who did NOT own the swap gets its actual SOL transfer instead of a phantom swap
+    expect(forOther?.kind).toBe("sol_transfer");
   });
 });

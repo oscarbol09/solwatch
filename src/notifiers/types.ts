@@ -1,4 +1,9 @@
-import { abortableSleep, computeBackoffDelayMs, parseRetryAfterMs } from "../domain/backoff.js";
+import {
+  abortableSleep,
+  computeBackoffDelayMs,
+  MAX_RETRY_AFTER_MS,
+  parseRetryAfterMs,
+} from "../domain/backoff.js";
 import { NotifierError } from "../domain/errors.js";
 import type { OnChainEvent, SolanaCluster } from "../domain/types.js";
 
@@ -41,7 +46,7 @@ function extractTelegramRetryAfterMs(rawBody: string): number | null {
     const parsed = JSON.parse(rawBody) as { parameters?: { retry_after?: unknown } };
     const retryAfterSec = parsed?.parameters?.retry_after;
     if (typeof retryAfterSec === "number" && Number.isFinite(retryAfterSec) && retryAfterSec >= 0) {
-      return Math.ceil(retryAfterSec * 1_000);
+      return Math.min(MAX_RETRY_AFTER_MS, Math.ceil(retryAfterSec * 1_000));
     }
   } catch {
     return null;

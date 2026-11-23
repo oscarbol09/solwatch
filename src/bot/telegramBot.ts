@@ -26,14 +26,12 @@ export function createTelegramBot(options: TelegramBotOptions): Bot {
   const allowedSet = new Set(options.allowedChatIds);
 
   bot.use(async (ctx, next) => {
-    if (allowedSet.size > 0) {
-      const chatId = ctx.chat?.id;
-      if (chatId === undefined || !allowedSet.has(String(chatId))) {
-        if (ctx.chat) {
-          await ctx.reply("Unauthorized chat. Add your chat ID to TELEGRAM_ALLOWED_CHAT_IDS.");
-        }
-        return;
+    const chatId = ctx.chat?.id;
+    if (allowedSet.size === 0 || chatId === undefined || !allowedSet.has(String(chatId))) {
+      if (ctx.chat) {
+        await ctx.reply("Unauthorized chat. Add your chat ID to TELEGRAM_ALLOWED_CHAT_IDS.");
       }
+      return;
     }
     await next();
   });

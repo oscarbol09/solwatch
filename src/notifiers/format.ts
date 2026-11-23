@@ -87,9 +87,10 @@ function eventColor(event: OnChainEvent): number {
 
 export function formatTelegramHtml(envelope: AlertEnvelope): string {
   const { event, walletLabel, summary, explorerUrl } = envelope;
+  const escapedWallet = escapeHtml(shortAddress(event.wallet));
   const walletHeading = walletLabel
-    ? `${escapeHtml(walletLabel)} (<code>${shortAddress(event.wallet)}</code>)`
-    : `<code>${shortAddress(event.wallet)}</code>`;
+    ? `${escapeHtml(walletLabel)} (<code>${escapedWallet}</code>)`
+    : `<code>${escapedWallet}</code>`;
 
   const lines = [
     `<b>${escapeHtml(eventTitle(event))}</b>`,
@@ -99,7 +100,9 @@ export function formatTelegramHtml(envelope: AlertEnvelope): string {
 
   if (event.kind === "sol_transfer" || event.kind === "spl_transfer") {
     if (event.counterparty) {
-      lines.push(`<b>Counterparty:</b> <code>${shortAddress(event.counterparty)}</code>`);
+      lines.push(
+        `<b>Counterparty:</b> <code>${escapeHtml(shortAddress(event.counterparty))}</code>`,
+      );
     }
   }
 
@@ -172,13 +175,17 @@ export function formatDiscordEmbed(envelope: AlertEnvelope): DiscordWebhookPaylo
     footer: { text: `solwatch • slot ${event.slot.toString()}` },
   };
 
+  const safeTimestamp =
+    event.timestampSec !== null &&
+    Number.isFinite(event.timestampSec) &&
+    event.timestampSec >= 0 &&
+    event.timestampSec <= 8_640_000_000
+      ? new Date(event.timestampSec * 1_000).toISOString()
+      : undefined;
+
   return {
     username: "solwatch",
-    embeds: [
-      event.timestampSec !== null
-        ? { ...embedBase, timestamp: new Date(event.timestampSec * 1_000).toISOString() }
-        : embedBase,
-    ],
+    embeds: [safeTimestamp !== undefined ? { ...embedBase, timestamp: safeTimestamp } : embedBase],
   };
 }
 

@@ -1,6 +1,5 @@
 import {
   createSolanaRpc,
-  isAbortError,
   isSolanaError,
   type Signature,
   SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
@@ -40,6 +39,7 @@ export type SolanaRpcClientOptions = {
   readonly commitment?: CommitmentLevel | undefined;
   readonly timeoutMs?: number | undefined;
   readonly maxRetries?: number | undefined;
+  readonly nullRetryDelayMs?: number | undefined;
   readonly baseBackoffMs?: number | undefined;
   readonly maxBackoffMs?: number | undefined;
   readonly sleep?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
@@ -91,6 +91,7 @@ export class SolanaRpcClient implements SolanaRpcPort {
   private readonly commitment: "confirmed" | "finalized";
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
+  private readonly nullRetryDelayMs: number;
   private readonly baseBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -102,17 +103,15 @@ export class SolanaRpcClient implements SolanaRpcPort {
     this.commitment = options.commitment === "finalized" ? "finalized" : "confirmed";
     this.timeoutMs = options.timeoutMs ?? 12_000;
     this.maxRetries = options.maxRetries ?? 3;
+    this.nullRetryDelayMs = options.nullRetryDelayMs ?? 250;
     this.baseBackoffMs = options.baseBackoffMs ?? 500;
     this.maxBackoffMs = options.maxBackoffMs ?? 8_000;
     this.sleep = options.sleep ?? abortableSleep;
     this.rng = options.rng ?? Math.random;
   }
 
-  async getTransaction(
-    signature: TxSignature,
-    signal?: AbortSignal,
-  ): Promise<SolanaTransactionInput | null> {
-    const raw = await this.withRetry(async (requestSignal) => {
+  private fetchRawJsonParsedTransaction(signature: TxSignature, signal?: AbortSignal) {
+    return this.withRetry(async (requestSignal) => {
       return this.rpc
         .getTransaction(signature, {
           commitment: this.commitment,
@@ -121,6 +120,20 @@ export class SolanaRpcClient implements SolanaRpcPort {
         })
         .send({ abortSignal: requestSignal });
     }, signal);
+  }
+
+  async getTransaction(
+    signature: TxSignature,
+    signal?: AbortSignal,
+  ): Promise<SolanaTransactionInput | null> {
+    const maxNullAttempts = Math.min(this.maxRetries, 2);
+    let raw = await this.fetchRawJsonParsedTransaction(signature, signal);
+
+    for (let nullAttempt = 0; nullAttempt < maxNullAttempts && raw === null; nullAttempt += 1) {
+      if (signal?.aborted) break;
+      await this.sleep(this.nullRetryDelayMs, signal);
+      raw = await this.fetchRawJsonParsedTransaction(signature, signal);
+    }
 
     if (raw === null || raw.meta === null) {
       return null;
@@ -214,7 +227,7 @@ export class SolanaRpcClient implements SolanaRpcPort {
       try {
         return await operation(requestSignal);
       } catch (err) {
-        if (callerSignal?.aborted && isAbortError(err)) {
+        if (callerSignal?.aborted) {
           throw new RpcError("Solana RPC request aborted", {
             retryable: false,
             statusCode: 499,

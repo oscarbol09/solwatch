@@ -64,7 +64,7 @@ const RawEnvSchema = z.object({
   SOLANA_COMMITMENT: z.enum(["processed", "confirmed", "finalized"]).default("confirmed"),
   DATABASE_PATH: z.string().trim().min(1).default("./data/solwatch.db"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  HOST: z.string().trim().min(1).default("0.0.0.0"),
+  HOST: z.string().trim().min(1).default("127.0.0.1"),
   API_TOKEN: optionalNonEmptyString(),
   HELIUS_WEBHOOK_SECRET: optionalNonEmptyString(),
   CONSOLE_ALERTS_ENABLED: envBoolean(true),
@@ -131,6 +131,13 @@ export function parseEnvConfig(env: NodeJS.ProcessEnv = process.env): AppConfig 
         .filter((id) => id.length > 0)
     : [];
 
+  if (data.TELEGRAM_INTERACTIVE_ENABLED && telegramAllowedChatIds.length === 0) {
+    throw new ValidationError(
+      "TELEGRAM_ALLOWED_CHAT_IDS must contain at least one chat ID when TELEGRAM_INTERACTIVE_ENABLED is true",
+      { field: "TELEGRAM_ALLOWED_CHAT_IDS" },
+    );
+  }
+
   return {
     solanaCluster: data.SOLANA_CLUSTER,
     solanaRpcUrl: data.SOLANA_RPC_URL,
@@ -161,6 +168,8 @@ const SECRET_QUERY_KEYS = new Set(["api-key", "apikey", "key", "token", "secret"
 export function redactUrlSecrets(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl);
+    if (parsed.username) parsed.username = "***";
+    if (parsed.password) parsed.password = "***";
     for (const [key] of parsed.searchParams.entries()) {
       if (SECRET_QUERY_KEYS.has(key.toLowerCase())) {
         parsed.searchParams.set(key, "***");

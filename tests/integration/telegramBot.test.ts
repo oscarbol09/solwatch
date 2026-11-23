@@ -161,6 +161,20 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
     await bot.handleUpdate(makeTextUpdate(8, 1001, "/watch bad-addr"));
     expect(replies.at(-1)).toContain("Invalid Solana wallet");
 
+    // Empty allowlist must fail closed rather than allowing public commands
+    const lockedBot = createTelegramBot({
+      botToken: "BOT_TOKEN",
+      allowedChatIds: [],
+      service,
+      store,
+      cluster: "mainnet-beta",
+      getStatus: () => ({ running: true, watchedCount: 0, reconnectsTotal: 0 }),
+      logger: createLogger("silent"),
+      botInfo: bot.botInfo,
+    });
+    await lockedBot.handleUpdate(makeTextUpdate(9, 1001, "/list"));
+    expect(replies.at(-1)).toContain("Unauthorized chat");
+
     store.close();
   });
 });

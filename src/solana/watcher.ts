@@ -63,6 +63,7 @@ export type SignatureHandler = (
   wallet: WalletAddress,
   signature: TxSignature,
   source: "websocket" | "backfill",
+  signal: AbortSignal,
 ) => Promise<void>;
 
 export type SolanaWatcherOptions = {
@@ -163,22 +164,21 @@ export class SolanaWatcher {
 
   private async runWalletLoop(wallet: WalletAddress, signal: AbortSignal): Promise<void> {
     let reconnectAttempt = 0;
-    let hasConnectedOnce = false;
 
     while (!signal.aborted) {
       try {
         const stream = await this.subscriptionPort.subscribeLogs(wallet, this.commitment, signal);
 
-        // Backfill gaps missed while the WebSocket channel was down before streaming new logs.
-        if (hasConnectedOnce) {
-          await this.backfillMissed(wallet, signal);
+        // Catch up only when a persisted cursor exists so restarts recover downtime without replaying old history on brand-new wallets.
+        const stored = this.store.getWallet(wallet);
+        if (stored?.lastSignature) {
+          await this.backfillMissed(wallet, stored.lastSignature, signal);
         }
-        hasConnectedOnce = true;
         reconnectAttempt = 0;
 
         for await (const item of stream) {
           if (signal.aborted) break;
-          await this.safeDispatchSignature(wallet, item.signature, "websocket");
+          await this.safeDispatchSignature(wallet, item.signature, "websocket", signal);
         }
       } catch (err) {
         if (signal.aborted || isAbortError(err)) {
@@ -202,19 +202,21 @@ export class SolanaWatcher {
     }
   }
 
-  private async backfillMissed(wallet: WalletAddress, signal: AbortSignal): Promise<void> {
-    const stored = this.store.getWallet(wallet);
-    const lastSig = stored?.lastSignature ?? undefined;
+  private async backfillMissed(
+    wallet: WalletAddress,
+    lastSignature: TxSignature,
+    signal: AbortSignal,
+  ): Promise<void> {
     try {
       const summaries = await this.rpcPort.getSignaturesForAddress(
         wallet,
-        { until: lastSig, limit: this.maxBackfillSignatures },
+        { until: lastSignature, limit: this.maxBackfillSignatures },
         signal,
       );
       // getSignaturesForAddress returns newest-first; replay oldest-first to preserve timeline.
       for (const entry of [...summaries].reverse()) {
         if (signal.aborted) break;
-        await this.safeDispatchSignature(wallet, entry.signature, "backfill");
+        await this.safeDispatchSignature(wallet, entry.signature, "backfill", signal);
       }
     } catch (err) {
       if (!signal.aborted) {
@@ -227,11 +229,14 @@ export class SolanaWatcher {
     wallet: WalletAddress,
     signature: TxSignature,
     source: "websocket" | "backfill",
+    signal: AbortSignal,
   ): Promise<void> {
     try {
-      await this.onSignature(wallet, signature, source);
+      await this.onSignature(wallet, signature, source, signal);
     } catch (err) {
-      this.logger.error({ wallet, signature, source, err }, "Failed handling signature");
+      if (!signal.aborted) {
+        this.logger.error({ wallet, signature, source, err }, "Failed handling signature");
+      }
     }
   }
 }

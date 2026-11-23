@@ -202,6 +202,69 @@ describe("SolanaRpcClient (MSW contract tests)", () => {
     expect(await client.getTransaction(sigSwap)).toBeNull();
   });
 
+  it("retries transient null getTransaction response caused by RPC indexing lag", async () => {
+    let calls = 0;
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        calls += 1;
+        const body = (await request.json()) as Record<string, unknown>;
+        if (calls === 1) {
+          return HttpResponse.json({ jsonrpc: "2.0", id: body.id, result: null });
+        }
+        return HttpResponse.json({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            slot: 310000100,
+            blockTime: 1760000100,
+            version: 0,
+            meta: {
+              err: null,
+              fee: 5000,
+              preBalances: [5000000000, 1000000000],
+              postBalances: [2499995000, 3500000000],
+              preTokenBalances: [],
+              postTokenBalances: [],
+              innerInstructions: [],
+            },
+            transaction: {
+              signatures: [SIG_SOL_IN],
+              message: {
+                recentBlockhash: "11111111111111111111111111111111",
+                accountKeys: [
+                  {
+                    pubkey: COUNTERPARTY_WALLET,
+                    signer: true,
+                    writable: true,
+                    source: "transaction",
+                  },
+                  {
+                    pubkey: WATCHED_WALLET_A,
+                    signer: false,
+                    writable: true,
+                    source: "transaction",
+                  },
+                ],
+                instructions: [
+                  { programId: "11111111111111111111111111111111", accounts: [], data: "11" },
+                ],
+              },
+            },
+          },
+        });
+      }),
+    );
+
+    const client = new SolanaRpcClient(RPC_URL, {
+      maxRetries: 2,
+      nullRetryDelayMs: 1,
+      sleep: async () => {},
+    });
+    const tx = await client.getTransaction(sigIn);
+    expect(calls).toBe(2);
+    expect(tx?.slot).toBe(310_000_100n);
+  });
+
   it("retries transient network errors and fails immediately on caller abort", async () => {
     let calls = 0;
     server.use(
@@ -211,16 +274,16 @@ describe("SolanaRpcClient (MSW contract tests)", () => {
           return HttpResponse.error();
         }
         const body = (await request.json()) as Record<string, unknown>;
-        return HttpResponse.json({ jsonrpc: "2.0", id: body.id, result: null });
+        return HttpResponse.json({ jsonrpc: "2.0", id: body.id, result: [] });
       }),
     );
 
     const client = new SolanaRpcClient(RPC_URL, { maxRetries: 1, sleep: async () => {} });
-    expect(await client.getTransaction(sigSwap)).toBeNull();
+    expect(await client.getSignaturesForAddress(walletA)).toEqual([]);
     expect(calls).toBe(2);
 
     const aborted = new AbortController();
-    aborted.abort();
+    aborted.abort(new Error("shutdown"));
     const err = await client.getTransaction(sigSwap, aborted.signal).catch((e) => e);
     expect(err).toBeInstanceOf(RpcError);
     expect((err as RpcError).retryable).toBe(false);

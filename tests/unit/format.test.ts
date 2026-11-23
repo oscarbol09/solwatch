@@ -34,13 +34,24 @@ describe("alert formatters", () => {
     );
 
     const event = classifyParsedTransaction(makeIncomingSolTx(), watched);
-    const envelope = buildAlertEnvelope(event, "<Treasury & Ops>", "devnet", "deliv_1");
+    const xssEvent =
+      event.kind === "sol_transfer" ? { ...event, counterparty: "<img src=x>" } : event;
+    const envelope = buildAlertEnvelope(xssEvent, "<Treasury & Ops>", "devnet", "deliv_1");
     const html = formatTelegramHtml(envelope);
 
     expect(html).toContain("&lt;Treasury &amp; Ops&gt;");
+    expect(html).toContain("&lt;img src=x&gt;");
     expect(html).not.toContain("<script>");
+    expect(html).not.toContain("<img");
     expect(html).toContain("+2.5 SOL");
     expect(html).toContain("?cluster=devnet");
+
+    // Out-of-range timestamps must be omitted rather than throwing RangeError
+    const hugeTsEvent = { ...event, timestampSec: 9e15 };
+    const discordHuge = formatDiscordEmbed(
+      buildAlertEnvelope(hugeTsEvent, null, "mainnet-beta", "del_ts"),
+    );
+    expect(discordHuge.embeds[0]?.timestamp).toBeUndefined();
   });
 
   it("formats Discord embeds, JSON-safe webhook payloads, and terminal cards across all event kinds", () => {

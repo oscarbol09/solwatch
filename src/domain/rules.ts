@@ -14,6 +14,7 @@ export type RuleEvaluationResult =
   | { readonly matched: false; readonly matchedRuleId: null; readonly reason: string };
 
 export class CooldownTracker {
+  private static readonly MAX_ENTRIES = 10_000;
   private readonly lastTriggeredMs = new Map<string, number>();
 
   private key(wallet: WalletAddress, eventType: EventType): string {
@@ -33,7 +34,16 @@ export class CooldownTracker {
   }
 
   record(wallet: WalletAddress, eventType: EventType, nowMs: number): void {
-    this.lastTriggeredMs.set(this.key(wallet, eventType), nowMs);
+    const mapKey = this.key(wallet, eventType);
+    if (this.lastTriggeredMs.has(mapKey)) {
+      this.lastTriggeredMs.delete(mapKey);
+    } else if (this.lastTriggeredMs.size >= CooldownTracker.MAX_ENTRIES) {
+      const oldestKey = this.lastTriggeredMs.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.lastTriggeredMs.delete(oldestKey);
+      }
+    }
+    this.lastTriggeredMs.set(mapKey, nowMs);
   }
 
   clear(): void {

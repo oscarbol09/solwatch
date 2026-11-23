@@ -218,11 +218,26 @@ function findSplCounterparty(
   return bestOwner;
 }
 
+const MAX_ATA_RENT_DUST_LAMPORTS = 5_000_000n;
+
+function normalizeLegScale18(leg: SignedLeg): bigint {
+  const shift = Math.max(0, 18 - leg.decimals);
+  return leg.rawAmount * 10n ** BigInt(shift);
+}
+
 function pickLargestLeg(legs: readonly SignedLeg[]): SignedLeg | undefined {
+  const nonDustSplLegs = legs.filter(
+    (leg) => leg.mint !== WSOL_MINT || leg.rawAmount > MAX_ATA_RENT_DUST_LAMPORTS,
+  );
+  const candidates = nonDustSplLegs.length > 0 ? nonDustSplLegs : legs;
+
   let best: SignedLeg | undefined;
-  for (const leg of legs) {
-    if (!best || leg.rawAmount > best.rawAmount) {
+  let bestScaled = -1n;
+  for (const leg of candidates) {
+    const scaled = normalizeLegScale18(leg);
+    if (!best || scaled > bestScaled) {
       best = leg;
+      bestScaled = scaled;
     }
   }
   return best;

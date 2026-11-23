@@ -69,6 +69,9 @@ describe("domain primitives and config", () => {
     expect(cfg.telegramAllowedChatIds).toEqual(["12345", "67890"]);
 
     expect(redactUrlSecrets(cfg.solanaRpcUrl)).toBe("https://mainnet.helius-rpc.com/?api-key=***");
+    expect(redactUrlSecrets("https://user:secretpass@rpc.local/?token=abc")).toBe(
+      "https://***:***@rpc.local/?token=***",
+    );
     expect(redactUrlSecrets("not a url")).toBe("<invalid-url>");
   });
 
@@ -80,6 +83,7 @@ describe("domain primitives and config", () => {
     });
     expect(yesCfg.consoleAlertsEnabled).toBe(true);
     expect(yesCfg.includeFailedTx).toBe(true);
+    expect(yesCfg.host).toBe("127.0.0.1");
 
     expect(() =>
       parseEnvConfig({
@@ -102,6 +106,13 @@ describe("domain primitives and config", () => {
     expect(() =>
       parseEnvConfig({
         TELEGRAM_INTERACTIVE_ENABLED: "true",
+      }),
+    ).toThrow(ValidationError);
+
+    expect(() =>
+      parseEnvConfig({
+        TELEGRAM_INTERACTIVE_ENABLED: "true",
+        TELEGRAM_BOT_TOKEN: "123456:ABC",
       }),
     ).toThrow(ValidationError);
   });

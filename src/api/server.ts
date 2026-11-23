@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { AppError, AuthError, NotFoundError, ValidationError } from "../domain/errors.js";
@@ -42,13 +43,16 @@ export function createApiApp(options: ApiServerOptions): Hono {
 
   app.onError((err, c) => {
     if (err instanceof AppError) {
-      return c.json(
-        {
+      return new Response(
+        JSON.stringify({
           error: err.code,
           message: err.message,
           details: err.details,
+        }),
+        {
+          status: err.statusCode,
+          headers: { "Content-Type": "application/json; charset=UTF-8" },
         },
-        err.statusCode as 400 | 401 | 404 | 409 | 502,
       );
     }
 
@@ -84,6 +88,9 @@ export function createApiApp(options: ApiServerOptions): Hono {
       metrics: options.service.getMetrics(),
     });
   });
+
+  app.use("/api/*", bodyLimit({ maxSize: 1024 * 1024 }));
+  app.use("/webhooks/*", bodyLimit({ maxSize: 1024 * 1024 }));
 
   app.use("/api/*", async (c, next) => {
     if (options.apiToken !== undefined) {
