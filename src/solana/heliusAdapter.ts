@@ -2,13 +2,13 @@ import { z } from "zod";
 import { ValidationError } from "../domain/errors.js";
 import { resolveTokenMetadata, shortAddress, WSOL_MINT } from "../domain/tokens.js";
 import {
-  type MintAddress,
   type OnChainEvent,
   parseMintAddress,
   parseTxSignature,
-  parseWalletAddress,
   type TokenLeg,
   type TxSignature,
+  tryParseMintAddress,
+  tryParseWalletAddress,
   type WalletAddress,
 } from "../domain/types.js";
 
@@ -99,13 +99,9 @@ function collectCandidateWallets(
 
   const matched: WalletAddress[] = [];
   for (const candidate of candidates) {
-    try {
-      const parsed = parseWalletAddress(candidate);
-      if (watchedSet.has(parsed)) {
-        matched.push(parsed);
-      }
-    } catch {
-      // Non-wallet placeholders or empty strings from webhook entries are ignored.
+    const parsed = tryParseWalletAddress(candidate);
+    if (parsed !== null && watchedSet.has(parsed)) {
+      matched.push(parsed);
     }
   }
   return matched;
@@ -125,12 +121,8 @@ function buildSwapLegFromHelius(
   }
   const firstToken = tokenLegs?.[0];
   if (!firstToken) return null;
-  let mint: MintAddress;
-  try {
-    mint = parseMintAddress(firstToken.mint);
-  } catch {
-    return null;
-  }
+  const mint = tryParseMintAddress(firstToken.mint);
+  if (mint === null) return null;
   const meta = resolveTokenMetadata(mint);
   return {
     mint,

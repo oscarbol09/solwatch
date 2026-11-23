@@ -95,20 +95,30 @@ export type AlertRule = {
   readonly enabled: boolean;
 };
 
-export function parseWalletAddress(raw: string): WalletAddress {
+export function tryParseWalletAddress(raw: string): WalletAddress | null {
   const trimmed = raw.trim();
-  if (!isAddress(trimmed)) {
+  return isAddress(trimmed) ? (trimmed as WalletAddress) : null;
+}
+
+export function parseWalletAddress(raw: string): WalletAddress {
+  const parsed = tryParseWalletAddress(raw);
+  if (parsed === null) {
     throw new ValidationError(`Invalid Solana wallet address: "${raw}"`, { field: "wallet" });
   }
-  return trimmed as WalletAddress;
+  return parsed;
+}
+
+export function tryParseMintAddress(raw: string): MintAddress | null {
+  const trimmed = raw.trim();
+  return isAddress(trimmed) ? (trimmed as MintAddress) : null;
 }
 
 export function parseMintAddress(raw: string): MintAddress {
-  const trimmed = raw.trim();
-  if (!isAddress(trimmed)) {
+  const parsed = tryParseMintAddress(raw);
+  if (parsed === null) {
     throw new ValidationError(`Invalid Solana mint address: "${raw}"`, { field: "mint" });
   }
-  return trimmed as MintAddress;
+  return parsed;
 }
 
 export function parseTxSignature(raw: string): TxSignature {

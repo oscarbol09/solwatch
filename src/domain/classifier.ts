@@ -2,9 +2,9 @@ import { resolveTokenMetadata, shortAddress, WSOL_MINT } from "./tokens.js";
 import {
   type MintAddress,
   type OnChainEvent,
-  parseMintAddress,
   parseTxSignature,
   type TokenLeg,
+  tryParseMintAddress,
   type WalletAddress,
 } from "./types.js";
 
@@ -112,12 +112,8 @@ function computeTokenDeltas(tx: SolanaTransactionInput): readonly TokenOwnerDelt
     for (const entry of entries) {
       const owner = entry.owner ?? tx.accountKeys[entry.accountIndex];
       if (!owner) continue;
-      let mint: MintAddress;
-      try {
-        mint = parseMintAddress(entry.mint);
-      } catch {
-        continue;
-      }
+      const mint = tryParseMintAddress(entry.mint);
+      if (mint === null) continue;
       const key = `${owner}:${mint}`;
       const existing = buckets.get(key) ?? {
         owner,
@@ -370,9 +366,7 @@ export function classifyParsedTransaction(
     };
   }
 
-  const labelPrograms =
-    nonBudgetPrograms.filter((p) => !INFRA_PROGRAMS.has(p)).map(shortAddress) ||
-    nonBudgetPrograms.map(shortAddress);
+  const labelPrograms = nonBudgetPrograms.filter((p) => !INFRA_PROGRAMS.has(p)).map(shortAddress);
   const summaryTarget =
     labelPrograms.length > 0
       ? labelPrograms.join(", ")
