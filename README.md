@@ -17,7 +17,7 @@ Most ad-hoc Solana wallet trackers break in the same three ways when deployed fo
 Requires Node.js `>=24.0.0`. No API keys or external database needed to try the full pipeline:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/oscarbol09/solwatch.git
 cd solwatch
 npm install
 npm run demo
@@ -128,3 +128,7 @@ npm run typecheck      # Strict TypeScript check (tsc --noEmit)
 npm run test:coverage  # Vitest unit + MSW/SQLite integration suite
 npm run build          # Emit production JS into dist/
 ```
+
+## License
+
+Source-available (`All Rights Reserved`). Publicly readable for technical evaluation; copying, redistribution, and commercial or production use require written permission. See [LICENSE](./LICENSE).
