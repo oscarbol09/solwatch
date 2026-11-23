@@ -288,4 +288,240 @@ describe("SolanaRpcClient (MSW contract tests)", () => {
     expect(err).toBeInstanceOf(RpcError);
     expect((err as RpcError).retryable).toBe(false);
   });
+
+  it("retries transient JSON-RPC -32005 errors, supports before pagination, and queries SPL + Token-2022 ATAs", async () => {
+    const rpcBodies: Array<Record<string, unknown>> = [];
+    let getTxCalls = 0;
+
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        rpcBodies.push(body);
+
+        if (body.method === "getSignaturesForAddress") {
+          return HttpResponse.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: [],
+          });
+        }
+
+        if (body.method === "getTokenAccountsByOwner") {
+          const params = body.params as [string, { programId: string }, Record<string, unknown>];
+          const program = params[1]?.programId;
+          const pubkey =
+            program === "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+              ? COUNTERPARTY_WALLET
+              : WATCHED_WALLET_A;
+          return HttpResponse.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              context: { slot: 310000100 },
+              value: [
+                { pubkey, account: { data: ["", "base64"], lamports: 2039280, owner: program } },
+              ],
+            },
+          });
+        }
+
+        if (body.method === "getTransaction") {
+          getTxCalls += 1;
+          if (getTxCalls === 1) {
+            return HttpResponse.json({
+              jsonrpc: "2.0",
+              id: body.id,
+              error: { code: -32005, message: "Node is behind by 150 slots" },
+            });
+          }
+          return HttpResponse.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              slot: 310000400,
+              blockTime: 1760000400,
+              version: 0,
+              meta: {
+                err: null,
+                fee: 5000,
+                preBalances: [5000000000],
+                postBalances: [4999995000],
+                preTokenBalances: [],
+                postTokenBalances: [],
+                innerInstructions: [
+                  {
+                    index: 0,
+                    instructions: [
+                      {
+                        programId: "11111111111111111111111111111111",
+                        parsed: {
+                          type: "transfer",
+                          info: { source: WATCHED_WALLET_A, lamports: 1000 },
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+              transaction: {
+                signatures: [SIG_JUPITER_SWAP],
+                message: {
+                  recentBlockhash: "11111111111111111111111111111111",
+                  accountKeys: [
+                    {
+                      pubkey: WATCHED_WALLET_A,
+                      signer: true,
+                      writable: true,
+                      source: "transaction",
+                    },
+                  ],
+                  instructions: [
+                    {
+                      programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                      parsed: { type: "closeAccount", info: { destination: WATCHED_WALLET_A } },
+                    },
+                  ],
+                },
+              },
+            },
+          });
+        }
+
+        return HttpResponse.json({ jsonrpc: "2.0", id: body.id, result: null });
+      }),
+    );
+
+    const client = new SolanaRpcClient(RPC_URL, {
+      maxRetries: 2,
+      txCacheTtlMs: 30_000,
+      sleep: async () => {},
+    });
+
+    await client.getSignaturesForAddress(walletA, { before: sigIn, until: sigSwap, limit: 50 });
+    const sigCall = rpcBodies.find((b) => b.method === "getSignaturesForAddress");
+    expect(sigCall?.params).toEqual([
+      WATCHED_WALLET_A,
+      { commitment: "confirmed", limit: 50, until: SIG_JUPITER_SWAP, before: SIG_SOL_IN },
+    ]);
+
+    const atas = await client.getTokenAccountsByOwner(walletA);
+    expect(atas).toEqual([COUNTERPARTY_WALLET, WATCHED_WALLET_A]);
+
+    // Concurrent calls coalesce into one RPC sequence (with -32005 retry) and subsequent call hits TTL cache
+    const [tx1, tx2] = await Promise.all([
+      client.getTransaction(sigSwap),
+      client.getTransaction(sigSwap),
+    ]);
+    const tx3 = await client.getTransaction(sigSwap);
+    expect(getTxCalls).toBe(2);
+    expect(tx1?.parsedInstructions).toHaveLength(2);
+    expect(tx2?.slot).toBe(310_000_400n);
+    expect(tx3?.slot).toBe(310_000_400n);
+  });
+
+  it("enforces AsyncSemaphore concurrency, aborts queued waiters, evicts LRU tx cache, supports partial coalesced aborts, and fails fast on -32602", async () => {
+    let activeRequests = 0;
+    let maxObservedConcurrency = 0;
+    let releaseFirst!: () => void;
+
+    server.use(
+      http.post(RPC_URL, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        if (body.method === "getSignaturesForAddress") {
+          return HttpResponse.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            error: { code: -32602, message: "Invalid params" },
+          });
+        }
+
+        const sigParam = (body.params as [string])[0];
+        activeRequests += 1;
+        maxObservedConcurrency = Math.max(maxObservedConcurrency, activeRequests);
+        try {
+          if (sigParam === SIG_SOL_IN) {
+            await new Promise<void>((resolve) => {
+              releaseFirst = resolve;
+            });
+          }
+          return HttpResponse.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              slot: 310000100,
+              blockTime: 1760000100,
+              version: 0,
+              meta: {
+                err: null,
+                fee: 5000,
+                preBalances: [1000000],
+                postBalances: [995000],
+                preTokenBalances: [],
+                postTokenBalances: [],
+                innerInstructions: [],
+              },
+              transaction: {
+                signatures: [sigParam],
+                message: {
+                  recentBlockhash: "11111111111111111111111111111111",
+                  accountKeys: [
+                    {
+                      pubkey: WATCHED_WALLET_A,
+                      signer: true,
+                      writable: true,
+                      source: "transaction",
+                    },
+                  ],
+                  instructions: [],
+                },
+              },
+            },
+          });
+        } finally {
+          activeRequests -= 1;
+        }
+      }),
+    );
+
+    const client = new SolanaRpcClient(RPC_URL, {
+      commitment: "finalized",
+      maxConcurrency: 1,
+      txCacheMaxEntries: 1,
+      txCacheTtlMs: 30_000,
+      maxRetries: 2,
+      sleep: async () => {},
+    });
+
+    // Non-retryable JSON-RPC -32602 fails fast without retries
+    const invalidErr = await client.getSignaturesForAddress(walletA).catch((e) => e);
+    expect(invalidErr).toBeInstanceOf(RpcError);
+    expect((invalidErr as RpcError).retryable).toBe(false);
+
+    // Launch slow first request + partial coalesced waiter abort + queued waiter abort
+    const p1 = client.getTransaction(sigIn);
+    await new Promise((r) => setTimeout(r, 10));
+
+    const queuedCtrl = new AbortController();
+    const pQueued = client.getTransaction(sigSwap, queuedCtrl.signal);
+    queuedCtrl.abort(new Error("queued timeout"));
+    const queuedErr = await pQueued.catch((e) => e);
+    expect(queuedErr).toBeInstanceOf(RpcError);
+    expect((queuedErr as RpcError).statusCode).toBe(499);
+
+    // Partial waiter abort on sigIn must leave p1 completing normally
+    const partialCtrl = new AbortController();
+    const pPartial = client.getTransaction(sigIn, partialCtrl.signal);
+    partialCtrl.abort();
+    const partialErr = await pPartial.catch((e) => e);
+    expect(partialErr).toBeInstanceOf(RpcError);
+
+    releaseFirst();
+    const res1 = await p1;
+    expect(res1?.slot).toBe(310_000_100n);
+    expect(maxObservedConcurrency).toBe(1);
+
+    // Inserting sigSwap into txCacheMaxEntries=1 evicts sigIn cleanly
+    const resSwap = await client.getTransaction(sigSwap);
+    expect(resSwap?.signature).toBe(SIG_JUPITER_SWAP);
+  });
 });
