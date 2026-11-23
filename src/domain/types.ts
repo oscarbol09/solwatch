@@ -1,0 +1,134 @@
+import { type Address, isAddress, isSignature, type Signature } from "@solana/kit";
+import { ValidationError } from "./errors.js";
+
+declare const solwatchBrand: unique symbol;
+
+export type Brand<T, B extends string> = T & { readonly [solwatchBrand]: B };
+
+export type WalletAddress = Brand<Address, "WalletAddress">;
+export type MintAddress = Brand<Address, "MintAddress">;
+export type TxSignature = Brand<Signature, "TxSignature">;
+export type RuleId = Brand<string, "RuleId">;
+
+export type SolanaCluster = "mainnet-beta" | "devnet" | "testnet";
+export type CommitmentLevel = "processed" | "confirmed" | "finalized";
+export type EventType = "sol_transfer" | "spl_transfer" | "dex_swap" | "program_interaction";
+
+export type TokenLeg = {
+  readonly mint: MintAddress;
+  readonly symbol: string;
+  readonly rawAmount: bigint;
+  readonly decimals: number;
+};
+
+export type OnChainEvent =
+  | {
+      readonly kind: "sol_transfer";
+      readonly signature: TxSignature;
+      readonly slot: bigint;
+      readonly timestampSec: number | null;
+      readonly wallet: WalletAddress;
+      readonly direction: "in" | "out";
+      readonly counterparty: string | null;
+      readonly lamports: bigint;
+      readonly feeLamports: bigint;
+      readonly success: boolean;
+    }
+  | {
+      readonly kind: "spl_transfer";
+      readonly signature: TxSignature;
+      readonly slot: bigint;
+      readonly timestampSec: number | null;
+      readonly wallet: WalletAddress;
+      readonly direction: "in" | "out";
+      readonly mint: MintAddress;
+      readonly symbol: string;
+      readonly rawAmount: bigint;
+      readonly decimals: number;
+      readonly counterparty: string | null;
+      readonly feeLamports: bigint;
+      readonly success: boolean;
+    }
+  | {
+      readonly kind: "dex_swap";
+      readonly signature: TxSignature;
+      readonly slot: bigint;
+      readonly timestampSec: number | null;
+      readonly wallet: WalletAddress;
+      readonly dex: string;
+      readonly programId: string;
+      readonly tokenIn: TokenLeg;
+      readonly tokenOut: TokenLeg;
+      readonly feeLamports: bigint;
+      readonly success: boolean;
+    }
+  | {
+      readonly kind: "program_interaction";
+      readonly signature: TxSignature;
+      readonly slot: bigint;
+      readonly timestampSec: number | null;
+      readonly wallet: WalletAddress;
+      readonly programIds: readonly string[];
+      readonly summary: string;
+      readonly feeLamports: bigint;
+      readonly success: boolean;
+    };
+
+export type WatchedWallet = {
+  readonly address: WalletAddress;
+  readonly label: string | null;
+  readonly enabled: boolean;
+  readonly lastSignature: TxSignature | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type AlertRule = {
+  readonly id: RuleId;
+  readonly walletAddress: WalletAddress | null;
+  readonly minSolLamports: bigint;
+  readonly eventTypes: readonly EventType[];
+  readonly mintAllowlist: readonly MintAddress[];
+  readonly mintDenylist: readonly MintAddress[];
+  readonly includeFailed: boolean;
+  readonly cooldownSeconds: number;
+  readonly enabled: boolean;
+};
+
+export function parseWalletAddress(raw: string): WalletAddress {
+  const trimmed = raw.trim();
+  if (!isAddress(trimmed)) {
+    throw new ValidationError(`Invalid Solana wallet address: "${raw}"`, { field: "wallet" });
+  }
+  return trimmed as WalletAddress;
+}
+
+export function parseMintAddress(raw: string): MintAddress {
+  const trimmed = raw.trim();
+  if (!isAddress(trimmed)) {
+    throw new ValidationError(`Invalid Solana mint address: "${raw}"`, { field: "mint" });
+  }
+  return trimmed as MintAddress;
+}
+
+export function parseTxSignature(raw: string): TxSignature {
+  const trimmed = raw.trim();
+  if (!isSignature(trimmed)) {
+    throw new ValidationError(`Invalid Solana transaction signature: "${raw}"`, {
+      field: "signature",
+    });
+  }
+  return trimmed as TxSignature;
+}
+
+export function parseRuleId(raw: string): RuleId {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new ValidationError("Rule ID cannot be empty", { field: "ruleId" });
+  }
+  return trimmed as RuleId;
+}
+
+export function assertNever(value: never, message = "Unhandled union member"): never {
+  throw new Error(`${message}: ${JSON.stringify(value)}`);
+}
