@@ -1,0 +1,16 @@
+services:
+  solwatch:
+    build: .
+    container_name: solwatch
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/solwatch.db
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - solwatch-data:/app/data
+
+volumes:
+  solwatch-data:
