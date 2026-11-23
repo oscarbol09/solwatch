@@ -1,0 +1,40 @@
+{
+  "name": "solwatch",
+  "version": "0.1.0",
+  "description": "Real-time Solana wallet monitor and multi-channel alert router",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "demo": "tsx src/demo.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.11",
+    "@solana/kit": "^8.6.0",
+    "grammy": "^1.48.0",
+    "hono": "^4.13.21",
+    "pino": "^10.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.8",
+    "@types/node": "^24.19.0",
+    "@vitest/coverage-v8": "^5.1.1",
+    "fast-check": "^4.11.0",
+    "msw": "^3.0.7",
+    "pino-pretty": "^13.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.1"
+  }
+}
