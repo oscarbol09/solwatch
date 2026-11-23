@@ -1,4 +1,5 @@
 import { type Address, isAddress, isSignature, type Signature } from "@solana/kit";
+import { z } from "zod";
 import { ValidationError } from "./errors.js";
 
 declare const solwatchBrand: unique symbol;
@@ -79,6 +80,9 @@ export type WatchedWallet = {
   readonly label: string | null;
   readonly enabled: boolean;
   readonly lastSignature: TxSignature | null;
+  readonly lastSlot: bigint | null;
+  readonly lastRpcSignature: TxSignature | null;
+  readonly lastRpcSlot: bigint | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 };
@@ -144,4 +148,141 @@ export function assertNever(value: never, message = "Unhandled union member"): n
     typeof item === "bigint" ? item.toString() : item,
   );
   throw new Error(`${message}: ${serialized}`);
+}
+
+const BigIntStringSchema = z
+  .string()
+  .regex(/^\d+$/)
+  .transform((v) => BigInt(v));
+
+const StoredTokenLegSchema = z.object({
+  mint: z.string(),
+  symbol: z.string(),
+  rawAmount: BigIntStringSchema,
+  decimals: z.number().int().min(0).max(18),
+});
+
+const BaseStoredEventSchema = {
+  signature: z.string(),
+  slot: BigIntStringSchema,
+  timestampSec: z.number().nullable(),
+  wallet: z.string(),
+  feeLamports: BigIntStringSchema,
+  success: z.boolean(),
+};
+
+const StoredEventSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("sol_transfer"),
+    ...BaseStoredEventSchema,
+    direction: z.enum(["in", "out"]),
+    counterparty: z.string().nullable(),
+    lamports: BigIntStringSchema,
+  }),
+  z.object({
+    kind: z.literal("spl_transfer"),
+    ...BaseStoredEventSchema,
+    direction: z.enum(["in", "out"]),
+    mint: z.string(),
+    symbol: z.string(),
+    rawAmount: BigIntStringSchema,
+    decimals: z.number().int().min(0).max(18),
+    counterparty: z.string().nullable(),
+  }),
+  z.object({
+    kind: z.literal("dex_swap"),
+    ...BaseStoredEventSchema,
+    dex: z.string(),
+    programId: z.string(),
+    tokenIn: StoredTokenLegSchema,
+    tokenOut: StoredTokenLegSchema,
+  }),
+  z.object({
+    kind: z.literal("program_interaction"),
+    ...BaseStoredEventSchema,
+    programIds: z.array(z.string()),
+    summary: z.string(),
+  }),
+]);
+
+export function serializeOnChainEvent(event: OnChainEvent): string {
+  return JSON.stringify(event, (_key, item: unknown) =>
+    typeof item === "bigint" ? item.toString() : item,
+  );
+}
+
+export function deserializeOnChainEvent(rawJson: string): OnChainEvent {
+  const parsed = StoredEventSchema.parse(JSON.parse(rawJson));
+  const signature = parseTxSignature(parsed.signature);
+  const wallet = parseWalletAddress(parsed.wallet);
+
+  switch (parsed.kind) {
+    case "sol_transfer":
+      return {
+        kind: "sol_transfer",
+        signature,
+        slot: parsed.slot,
+        timestampSec: parsed.timestampSec,
+        wallet,
+        direction: parsed.direction,
+        counterparty: parsed.counterparty,
+        lamports: parsed.lamports,
+        feeLamports: parsed.feeLamports,
+        success: parsed.success,
+      };
+    case "spl_transfer":
+      return {
+        kind: "spl_transfer",
+        signature,
+        slot: parsed.slot,
+        timestampSec: parsed.timestampSec,
+        wallet,
+        direction: parsed.direction,
+        mint: parseMintAddress(parsed.mint),
+        symbol: parsed.symbol,
+        rawAmount: parsed.rawAmount,
+        decimals: parsed.decimals,
+        counterparty: parsed.counterparty,
+        feeLamports: parsed.feeLamports,
+        success: parsed.success,
+      };
+    case "dex_swap":
+      return {
+        kind: "dex_swap",
+        signature,
+        slot: parsed.slot,
+        timestampSec: parsed.timestampSec,
+        wallet,
+        dex: parsed.dex,
+        programId: parsed.programId,
+        tokenIn: {
+          mint: parseMintAddress(parsed.tokenIn.mint),
+          symbol: parsed.tokenIn.symbol,
+          rawAmount: parsed.tokenIn.rawAmount,
+          decimals: parsed.tokenIn.decimals,
+        },
+        tokenOut: {
+          mint: parseMintAddress(parsed.tokenOut.mint),
+          symbol: parsed.tokenOut.symbol,
+          rawAmount: parsed.tokenOut.rawAmount,
+          decimals: parsed.tokenOut.decimals,
+        },
+        feeLamports: parsed.feeLamports,
+        success: parsed.success,
+      };
+    case "program_interaction":
+      return {
+        kind: "program_interaction",
+        signature,
+        slot: parsed.slot,
+        timestampSec: parsed.timestampSec,
+        wallet,
+        programIds: parsed.programIds,
+        summary: parsed.summary,
+        feeLamports: parsed.feeLamports,
+        success: parsed.success,
+      };
+    default:
+      return assertNever(parsed);
+  }
 }

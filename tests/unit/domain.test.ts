@@ -9,12 +9,16 @@ import {
   RpcError,
   ValidationError,
 } from "../../src/domain/errors.js";
+import { USDC_MINT, WSOL_MINT } from "../../src/domain/tokens.js";
 import {
   assertNever,
+  deserializeOnChainEvent,
+  type OnChainEvent,
   parseMintAddress,
   parseRuleId,
   parseTxSignature,
   parseWalletAddress,
+  serializeOnChainEvent,
 } from "../../src/domain/types.js";
 
 describe("domain primitives and config", () => {
@@ -115,5 +119,70 @@ describe("domain primitives and config", () => {
         TELEGRAM_BOT_TOKEN: "123456:ABC",
       }),
     ).toThrow(ValidationError);
+  });
+
+  it("round-trips all 4 OnChainEvent variants through serializeOnChainEvent and deserializeOnChainEvent", () => {
+    const wallet = parseWalletAddress("So11111111111111111111111111111111111111112");
+    const signature = parseTxSignature(
+      "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW",
+    );
+
+    const events: readonly OnChainEvent[] = [
+      {
+        kind: "sol_transfer",
+        signature,
+        slot: 310_000_100n,
+        timestampSec: 1_760_000_000,
+        wallet,
+        direction: "in",
+        counterparty: null,
+        lamports: 1_500_000_000n,
+        feeLamports: 5_000n,
+        success: true,
+      },
+      {
+        kind: "spl_transfer",
+        signature,
+        slot: 310_000_200n,
+        timestampSec: null,
+        wallet,
+        direction: "out",
+        mint: USDC_MINT,
+        symbol: "USDC",
+        rawAmount: 25_000_000n,
+        decimals: 6,
+        counterparty: "GsbwXfJraMomNxBcjYLcG3mxkBUiyWXAB32fGbSQQRJe",
+        feeLamports: 5_000n,
+        success: true,
+      },
+      {
+        kind: "dex_swap",
+        signature,
+        slot: 310_000_300n,
+        timestampSec: 1_760_000_300,
+        wallet,
+        dex: "Jupiter",
+        programId: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+        tokenIn: { mint: WSOL_MINT, symbol: "SOL", rawAmount: 1_000_000_000n, decimals: 9 },
+        tokenOut: { mint: USDC_MINT, symbol: "USDC", rawAmount: 180_000_000n, decimals: 6 },
+        feeLamports: 15_000n,
+        success: true,
+      },
+      {
+        kind: "program_interaction",
+        signature,
+        slot: 310_000_400n,
+        timestampSec: 1_760_000_400,
+        wallet,
+        programIds: ["Stake11111111111111111111111111111111111111"],
+        summary: "Invoked Stake",
+        feeLamports: 5_000n,
+        success: false,
+      },
+    ];
+
+    for (const ev of events) {
+      expect(deserializeOnChainEvent(serializeOnChainEvent(ev))).toEqual(ev);
+    }
   });
 });
