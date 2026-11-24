@@ -1,9 +1,8 @@
-import { createHmac } from "node:crypto";
 import { HttpResponse, http } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { classifyParsedTransaction } from "../../src/domain/classifier.js";
-import { NotifierError } from "../../src/domain/errors.js";
+import { NotifierError, ValidationError } from "../../src/domain/errors.js";
 import { parseWalletAddress } from "../../src/domain/types.js";
 import { createLogger } from "../../src/logger.js";
 import { ConsoleNotifier } from "../../src/notifiers/consoleNotifier.js";
@@ -11,7 +10,8 @@ import { DiscordNotifier } from "../../src/notifiers/discordNotifier.js";
 import { AlertDispatcher } from "../../src/notifiers/dispatcher.js";
 import { buildAlertEnvelope } from "../../src/notifiers/format.js";
 import { TelegramNotifier } from "../../src/notifiers/telegramNotifier.js";
-import { WebhookNotifier } from "../../src/notifiers/webhookNotifier.js";
+import type { Notifier } from "../../src/notifiers/types.js";
+import { verifyWebhookSignature, WebhookNotifier } from "../../src/notifiers/webhookNotifier.js";
 import { SqliteStore } from "../../src/store/sqliteStore.js";
 import {
   makeJupiterSwapTx,
@@ -25,6 +25,7 @@ afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
 const watched = parseWalletAddress(WATCHED_WALLET_A);
+const publicResolve = async () => [{ address: "93.184.216.34", family: 4 }];
 
 describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
   it("delivers Telegram HTML alert with Solscan inline button and retries on 429 retry_after", async () => {
@@ -66,7 +67,7 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
     expect(JSON.stringify(capturedBody?.reply_markup)).toContain(envelope.explorerUrl);
   });
 
-  it("delivers Discord embed and honors Retry-After on HTTP 429", async () => {
+  it("delivers Discord embed with disabled mentions and honors Retry-After on HTTP 429", async () => {
     const discordUrl = "https://discord.com/api/webhooks/12345/secret-token";
     let calls = 0;
     let capturedPayload: Record<string, unknown> | undefined;
@@ -96,17 +97,24 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
 
     expect(calls).toBe(2);
     expect(Array.isArray(capturedPayload?.embeds)).toBe(true);
+    expect(capturedPayload?.allowed_mentions).toEqual({ parse: [] });
   });
 
-  it("signs generic webhook payloads with HMAC-SHA256 and fails fast on 400", async () => {
-    const webhookUrl = "https://hooks.client.local/solana";
-    const secret = "whsec_super_secret";
+  it("signs generic webhook payloads with timestamped HMAC-SHA256 and fails fast on 400", async () => {
+    const webhookUrl = "https://hooks.example.com/solana";
+    const secret = "whsec_super_secret_key_with_sufficient_entropy";
     let capturedSig = "";
+    let capturedTimestamp = "";
+    let capturedDelivery = "";
+    let capturedEvent = "";
     let capturedRawBody = "";
 
     server.use(
       http.post(webhookUrl, async ({ request }) => {
         capturedSig = request.headers.get("x-solwatch-signature") ?? "";
+        capturedTimestamp = request.headers.get("x-solwatch-timestamp") ?? "";
+        capturedDelivery = request.headers.get("x-solwatch-delivery") ?? "";
+        capturedEvent = request.headers.get("x-solwatch-event") ?? "";
         capturedRawBody = await request.text();
         return HttpResponse.json({ received: true });
       }),
@@ -115,6 +123,8 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
     const notifier = new WebhookNotifier({
       url: webhookUrl,
       secret,
+      resolveHost: publicResolve,
+      nowSec: () => 1_760_000_000,
       maxRetries: 1,
       sleep: async () => {},
     });
@@ -122,8 +132,18 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
     const event = classifyParsedTransaction(makeJupiterSwapTx(), watched);
     await notifier.send(buildAlertEnvelope(event, "Treasury", "mainnet-beta", "del_wh_1"));
 
-    const expectedSig = `sha256=${createHmac("sha256", secret).update(capturedRawBody).digest("hex")}`;
-    expect(capturedSig).toBe(expectedSig);
+    expect(capturedTimestamp).toBe("1760000000");
+    expect(
+      verifyWebhookSignature({
+        rawBody: capturedRawBody,
+        signatureHeader: capturedSig,
+        timestampHeader: capturedTimestamp,
+        deliveryId: capturedDelivery,
+        eventKind: capturedEvent,
+        secret,
+        nowSec: 1_760_000_030,
+      }),
+    ).toBe(true);
 
     // 400 must fail fast without retrying
     let badAttempts = 0;
@@ -142,23 +162,50 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
     expect((err as NotifierError).retryable).toBe(false);
   });
 
-  it("isolates failing channels in AlertDispatcher and records every channel outcome in SQLite", async () => {
+  it("blocks constructor and DNS SSRF bypasses across Discord, Telegram, and Webhook notifiers", async () => {
+    expect(
+      () => new DiscordNotifier({ webhookUrl: "https://attacker.com/api/webhooks/1/2" }),
+    ).toThrow(ValidationError);
+    expect(() => new TelegramNotifier({ botToken: "123:abc/inject", chatId: "1001" })).toThrow(
+      ValidationError,
+    );
+
+    const ssrfNotifier = new WebhookNotifier({
+      url: "https://hooks.example.com/hook",
+      resolveHost: async () => [{ address: "169.254.169.254", family: 4 }],
+      maxRetries: 0,
+    });
+    const event = classifyParsedTransaction(makeJupiterSwapTx(), watched);
+    await expect(
+      ssrfNotifier.send(buildAlertEnvelope(event, null, "mainnet-beta", "del_ssrf")),
+    ).rejects.toThrow(NotifierError);
+  });
+
+  it("isolates failing channels, redacts error messages in SQLite, and handles unconfigured channels", async () => {
     const store = new SqliteStore(":memory:");
     store.createWallet(watched, "Treasury");
 
-    const discordUrl = "https://discord.com/api/webhooks/fail/endpoint";
-    const webhookUrl = "https://hooks.client.local/ok";
+    const discordUrl = "https://discord.com/api/webhooks/99999/secret_webhook_token_leak";
+    const webhookUrl = "https://hooks.example.com/ok";
     server.use(
       http.post(discordUrl, () => new HttpResponse("down", { status: 500 })),
       http.post(webhookUrl, () => HttpResponse.json({ ok: true })),
     );
+
+    const leakyNotifier: Notifier = {
+      channel: "custom",
+      async send() {
+        throw new Error(`Failed calling ${discordUrl} Bearer leaked_bearer_secret`);
+      },
+    };
 
     const consoleWrites: string[] = [];
     const dispatcher = new AlertDispatcher({
       notifiers: [
         new ConsoleNotifier((line) => consoleWrites.push(line)),
         new DiscordNotifier({ webhookUrl: discordUrl, maxRetries: 0 }),
-        new WebhookNotifier({ url: webhookUrl, maxRetries: 0 }),
+        new WebhookNotifier({ url: webhookUrl, maxRetries: 0, resolveHost: publicResolve }),
+        leakyNotifier,
       ],
       store,
       cluster: "mainnet-beta",
@@ -177,13 +224,21 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
         errorMessage: expect.stringContaining("500"),
       },
       { channel: "webhook", status: "sent" },
+      {
+        channel: "custom",
+        status: "failed",
+        errorMessage: expect.not.stringContaining("secret_webhook_token_leak"),
+      },
     ]);
 
     const history = store.listRecentAlerts(10);
-    expect(history).toHaveLength(3);
+    expect(history).toHaveLength(4);
     expect(history.filter((r) => r.status === "sent")).toHaveLength(2);
-    expect(history.filter((r) => r.status === "failed")).toHaveLength(1);
-    expect(dispatcher.getChannels()).toEqual(["console", "discord", "webhook"]);
+    expect(history.filter((r) => r.status === "failed")).toHaveLength(2);
+    const customRow = history.find((r) => r.channel === "custom");
+    expect(customRow?.errorMessage).not.toContain("leaked_bearer_secret");
+    expect(customRow?.errorMessage).not.toContain("secret_webhook_token_leak");
+    expect(dispatcher.getChannels()).toEqual(["console", "discord", "webhook", "custom"]);
 
     const emptyDispatcher = new AlertDispatcher({
       notifiers: [],
@@ -210,7 +265,7 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
   });
 
   it("retries transient network failures and respects caller AbortSignal", async () => {
-    const url = "https://hooks.client.local/flaky";
+    const url = "https://hooks.example.com/flaky";
     let calls = 0;
     server.use(
       http.post(url, () => {
@@ -224,6 +279,7 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
 
     const notifier = new WebhookNotifier({
       url,
+      resolveHost: publicResolve,
       maxRetries: 1,
       sleep: async () => {},
     });

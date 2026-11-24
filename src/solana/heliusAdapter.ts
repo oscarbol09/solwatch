@@ -12,6 +12,7 @@ import {
   tryParseWalletAddress,
   type WalletAddress,
 } from "../domain/types.js";
+import { sanitizeControlChars } from "../security/sanitize.js";
 
 const UNSIGNED_INT_STRING = /^\d{1,39}$/;
 const MAX_HELIUS_BATCH_SIZE = 200;
@@ -77,13 +78,23 @@ const HeliusTransactionSchema = z.object({
   feePayer: z.string().nullish(),
   type: z
     .string()
+    .max(100)
     .nullish()
-    .transform((v) => v ?? "UNKNOWN"),
+    .transform((v) => sanitizeControlChars(v ?? "UNKNOWN", 100) || "UNKNOWN"),
   source: z
     .string()
+    .max(100)
     .nullish()
-    .transform((v) => v ?? "UNKNOWN"),
-  description: z.string().nullish(),
+    .transform((v) => sanitizeControlChars(v ?? "UNKNOWN", 100) || "UNKNOWN"),
+  description: z
+    .string()
+    .max(500)
+    .nullish()
+    .transform((v) => {
+      if (v === null || v === undefined) return null;
+      const clean = sanitizeControlChars(v, 240);
+      return clean.length > 0 ? clean : null;
+    }),
   transactionError: z.unknown().nullish(),
   nativeTransfers: z.array(HeliusNativeTransferSchema).max(MAX_HELIUS_BATCH_SIZE).nullish(),
   tokenTransfers: z.array(HeliusTokenTransferSchema).max(MAX_HELIUS_BATCH_SIZE).nullish(),

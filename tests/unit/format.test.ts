@@ -71,6 +71,7 @@ describe("alert formatters", () => {
       const discord = formatDiscordEmbed(envelope);
       expect(discord.embeds).toHaveLength(1);
       expect(discord.embeds[0]?.url).toBe(envelope.explorerUrl);
+      expect(discord.allowed_mentions).toEqual({ parse: [] });
 
       const html = formatTelegramHtml(envelope);
       expect(html).toContain("Open on Solscan");
@@ -83,5 +84,28 @@ describe("alert formatters", () => {
       const line = formatConsoleLine(envelope);
       expect(line).toContain(event.signature);
     }
+  });
+
+  it("neutralizes Discord Markdown phishing and strips ANSI escapes in terminal output", () => {
+    const event = classifyParsedTransaction(makeProgramOnlyTx(), watched);
+    const maliciousEvent =
+      event.kind === "program_interaction"
+        ? { ...event, summary: "\u001b[31mFake\u001b[0m > [Claim](https://evil.test)" }
+        : event;
+    const envelope = buildAlertEnvelope(
+      maliciousEvent,
+      "\u001b]0;Spoof\u0007[Wallet](https://evil.test)",
+      "mainnet-beta",
+      "del_md",
+    );
+
+    const discord = formatDiscordEmbed(envelope);
+    expect(discord.allowed_mentions).toEqual({ parse: [] });
+    expect(discord.embeds[0]?.description).toContain("\\[Claim\\]\\(https://evil.test\\)");
+    expect(discord.embeds[0]?.fields[0]?.value).toContain("\\[Wallet\\]\\(https://evil.test\\)");
+
+    const consoleCard = formatConsoleLine(envelope);
+    expect(consoleCard).not.toContain("\u001b");
+    expect(consoleCard).toContain("Fake");
   });
 });

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { OnChainEvent, SolanaCluster } from "../domain/types.js";
 import type { AppLogger } from "../logger.js";
+import { sanitizeSecretText } from "../security/sanitize.js";
 import type { NewDeliveryRecord, SqliteStore } from "../store/sqliteStore.js";
 import { buildAlertEnvelope, summarizeEvent } from "./format.js";
 import type { DeliveryResult, Notifier } from "./types.js";
@@ -80,8 +81,9 @@ export class AlertDispatcher {
         });
         results.push({ channel: notifier.channel, status: "sent" });
       } else {
-        const errorMessage =
+        const rawMessage =
           outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+        const errorMessage = sanitizeSecretText(rawMessage, 500);
         this.logger.error(
           {
             deliveryId,
@@ -138,7 +140,8 @@ export class AlertDispatcher {
       });
       return { channel: channelName, status: "sent" };
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const errorMessage = sanitizeSecretText(rawMessage, 500);
       this.logger.error(
         { deliveryId, channel: channelName, signature: event.signature, err },
         "Outbox alert delivery retry failed",

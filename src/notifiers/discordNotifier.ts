@@ -1,3 +1,4 @@
+import { validateDiscordWebhookUrl } from "../security/ssrf.js";
 import { formatDiscordEmbed } from "./format.js";
 import { type AlertEnvelope, type Notifier, postJsonWithRetry } from "./types.js";
 
@@ -12,15 +13,17 @@ export type DiscordNotifierOptions = {
 export class DiscordNotifier implements Notifier {
   readonly channel = "discord";
   private readonly options: DiscordNotifierOptions;
+  private readonly validatedUrl: string;
 
   constructor(options: DiscordNotifierOptions) {
+    this.validatedUrl = validateDiscordWebhookUrl(options.webhookUrl).toString();
     this.options = options;
   }
 
   async send(envelope: AlertEnvelope, signal?: AbortSignal): Promise<void> {
     await postJsonWithRetry({
       channel: this.channel,
-      url: this.options.webhookUrl,
+      url: this.validatedUrl,
       body: JSON.stringify(formatDiscordEmbed(envelope)),
       timeoutMs: this.options.timeoutMs,
       maxRetries: this.options.maxRetries,

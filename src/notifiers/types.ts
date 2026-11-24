@@ -6,6 +6,9 @@ import {
 } from "../domain/backoff.js";
 import { NotifierError } from "../domain/errors.js";
 import type { OnChainEvent, SolanaCluster } from "../domain/types.js";
+import { sanitizeSecretText } from "../security/sanitize.js";
+
+const MAX_ERROR_BODY_BYTES = 16_384;
 
 export type AlertEnvelope = {
   readonly deliveryId: string;
@@ -32,6 +35,7 @@ export type HttpRetryConfig = {
   readonly url: string;
   readonly body: string;
   readonly headers?: Record<string, string> | undefined;
+  readonly beforeRequest?: ((url: string) => Promise<void>) | undefined;
   readonly timeoutMs?: number | undefined;
   readonly maxRetries?: number | undefined;
   readonly baseBackoffMs?: number | undefined;
@@ -40,6 +44,41 @@ export type HttpRetryConfig = {
   readonly rng?: (() => number) | undefined;
   readonly signal?: AbortSignal | undefined;
 };
+
+export async function readBoundedText(
+  response: Response,
+  maxBytes: number = MAX_ERROR_BODY_BYTES,
+): Promise<string> {
+  if (!response.body) {
+    const fallback = await response.text();
+    return fallback.length > maxBytes ? fallback.slice(0, maxBytes) : fallback;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let result = "";
+
+  try {
+    while (totalBytes < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      const remaining = maxBytes - totalBytes;
+      if (value.byteLength > remaining) {
+        result += decoder.decode(value.subarray(0, remaining), { stream: true });
+        totalBytes = maxBytes;
+        await reader.cancel().catch(() => {});
+        break;
+      }
+      result += decoder.decode(value, { stream: true });
+      totalBytes += value.byteLength;
+    }
+    result += decoder.decode();
+    return result;
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 function extractTelegramRetryAfterMs(rawBody: string): number | null {
   try {
@@ -76,6 +115,10 @@ export async function postJsonWithRetry(config: HttpRetryConfig): Promise<void> 
       : timeoutSignal;
 
     try {
+      if (config.beforeRequest) {
+        await config.beforeRequest(config.url);
+      }
+
       const response = await fetch(config.url, {
         method: "POST",
         headers: {
@@ -83,14 +126,16 @@ export async function postJsonWithRetry(config: HttpRetryConfig): Promise<void> 
           ...config.headers,
         },
         body: config.body,
+        redirect: "error",
         signal: requestSignal,
       });
 
       if (response.ok) {
+        await response.body?.cancel().catch(() => {});
         return;
       }
 
-      const bodyText = await response.text().catch(() => "");
+      const bodyText = await readBoundedText(response, MAX_ERROR_BODY_BYTES).catch(() => "");
       const retryAfterMs =
         parseRetryAfterMs(response.headers.get("retry-after")) ??
         (response.status === 429 ? extractTelegramRetryAfterMs(bodyText) : null);
@@ -115,7 +160,16 @@ export async function postJsonWithRetry(config: HttpRetryConfig): Promise<void> 
       );
     } catch (err) {
       if (err instanceof NotifierError) {
-        throw err;
+        if (!err.retryable || attempt >= maxRetries) {
+          throw err;
+        }
+        const delayMs = computeBackoffDelayMs(
+          attempt,
+          { baseMs: baseBackoffMs, maxMs: maxBackoffMs },
+          rng,
+        );
+        await sleep(delayMs, config.signal);
+        continue;
       }
       if (config.signal?.aborted) {
         throw new NotifierError(config.channel, "Alert delivery aborted", {
@@ -132,14 +186,12 @@ export async function postJsonWithRetry(config: HttpRetryConfig): Promise<void> 
         await sleep(delayMs, config.signal);
         continue;
       }
-      throw new NotifierError(
-        config.channel,
-        `${config.channel} delivery failed: ${err instanceof Error ? err.message : String(err)}`,
-        {
-          retryable: true,
-          cause: err,
-        },
-      );
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const safeMessage = sanitizeSecretText(rawMessage, 300);
+      throw new NotifierError(config.channel, `${config.channel} delivery failed: ${safeMessage}`, {
+        retryable: true,
+        cause: err,
+      });
     }
   }
 }

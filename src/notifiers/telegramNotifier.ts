@@ -1,5 +1,8 @@
+import { ValidationError } from "../domain/errors.js";
 import { formatTelegramHtml } from "./format.js";
 import { type AlertEnvelope, type Notifier, postJsonWithRetry } from "./types.js";
+
+const UNSAFE_BOT_TOKEN_RE = /[\s/?#@]/;
 
 export type TelegramNotifierOptions = {
   readonly botToken: string;
@@ -15,7 +18,14 @@ export class TelegramNotifier implements Notifier {
   private readonly options: TelegramNotifierOptions;
 
   constructor(options: TelegramNotifierOptions) {
-    this.options = options;
+    const trimmedToken = options.botToken.trim();
+    if (trimmedToken.length === 0 || UNSAFE_BOT_TOKEN_RE.test(trimmedToken)) {
+      throw new ValidationError("Invalid Telegram bot token format", { field: "botToken" });
+    }
+    this.options = {
+      ...options,
+      botToken: trimmedToken,
+    };
   }
 
   async send(envelope: AlertEnvelope, signal?: AbortSignal): Promise<void> {

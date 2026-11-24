@@ -75,7 +75,7 @@ flowchart LR
 
 ## Telegram Bot Commands
 
-Enable interactive commands by setting `TELEGRAM_BOT_TOKEN`, `TELEGRAM_INTERACTIVE_ENABLED=true`, and restricting access via `TELEGRAM_ALLOWED_CHAT_IDS`:
+Enable interactive commands by setting `TELEGRAM_BOT_TOKEN`, `TELEGRAM_INTERACTIVE_ENABLED=true`, restricting chats via `TELEGRAM_ALLOWED_CHAT_IDS`, and scoping `/watch` / `/unwatch` admin user IDs via `TELEGRAM_ALLOWED_USER_IDS`:
 
 | Command                    | Description                                                           |
 | :------------------------- | :-------------------------------------------------------------------- |
@@ -87,27 +87,39 @@ Enable interactive commands by setting `TELEGRAM_BOT_TOKEN`, `TELEGRAM_INTERACTI
 
 ## HTTP API & Signed Webhooks
 
-| Endpoint                              | Auth                    | Purpose                                                  |
-| :------------------------------------ | :---------------------- | :------------------------------------------------------- |
-| `GET /healthz`                        | Public                  | Container health, cluster, active channels, and counters |
-| `GET /api/wallets`                    | Bearer `API_TOKEN`      | List tracked wallets and cursors                         |
-| `POST /api/wallets`                   | Bearer `API_TOKEN`      | Add wallet `{ "address", "label?" }`                     |
-| `DELETE /api/wallets/:address`        | Bearer `API_TOKEN`      | Remove wallet and stop its watcher                       |
-| `GET /api/alerts?limit=25&wallet=...` | Bearer `API_TOKEN`      | Query delivery audit log                                 |
-| `POST /webhooks/helius`               | `HELIUS_WEBHOOK_SECRET` | Ingest Helius Enhanced Webhook transaction arrays        |
+Bind beyond loopback requires `API_TOKEN` (`>= 32` chars). `POST /webhooks/helius` stays disabled (`503`) unless `HELIUS_WEBHOOK_SECRET` (`>= 32` chars) is set.
 
-When `WEBHOOK_SECRET` is set, outbound `WEBHOOK_URL` requests include `X-Solwatch-Delivery`, `X-Solwatch-Event`, and `X-Solwatch-Signature` (`sha256=<hex>`):
+| Endpoint                              | Auth                    | Purpose                                                 |
+| :------------------------------------ | :---------------------- | :------------------------------------------------------ |
+| `GET /healthz`                        | Public                  | Minimal container liveness probe (`{ "status": "ok" }`) |
+| `GET /api/status`                     | Bearer `API_TOKEN`      | Operational uptime, cluster, channels, and counters     |
+| `GET /api/wallets`                    | Bearer `API_TOKEN`      | List tracked wallets and cursors                        |
+| `POST /api/wallets`                   | Bearer `API_TOKEN`      | Add wallet `{ "address", "label?" }`                    |
+| `DELETE /api/wallets/:address`        | Bearer `API_TOKEN`      | Remove wallet and stop its watcher                      |
+| `GET /api/alerts?limit=25&wallet=...` | Bearer `API_TOKEN`      | Query delivery audit log                                |
+| `POST /webhooks/helius`               | `HELIUS_WEBHOOK_SECRET` | Ingest Helius Enhanced Webhook transaction arrays       |
+
+When `WEBHOOK_SECRET` is set, outbound `WEBHOOK_URL` requests include `X-Solwatch-Delivery`, `X-Solwatch-Event`, `X-Solwatch-Timestamp` (Unix seconds), and `X-Solwatch-Signature` (`sha256=<hex>` computed over `${timestamp}.${deliveryId}.${eventKind}.${rawBody}`):
 
 ```ts
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-export function verifySolwatchSignature(
-  rawBody: string,
-  headerSig: string,
-  secret: string,
-): boolean {
-  const expected = `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
-  const a = Buffer.from(headerSig);
+export function verifySolwatchSignature(params: {
+  rawBody: string;
+  headerSig: string;
+  timestamp: string;
+  deliveryId: string;
+  eventKind: string;
+  secret: string;
+  toleranceSec?: number;
+}): boolean {
+  if (!/^\d{1,12}$/.test(params.timestamp)) return false;
+  const ageSec = Math.abs(Math.floor(Date.now() / 1_000) - Number(params.timestamp));
+  if (ageSec > (params.toleranceSec ?? 300)) return false;
+
+  const payload = `${params.timestamp}.${params.deliveryId}.${params.eventKind}.${params.rawBody}`;
+  const expected = `sha256=${createHmac("sha256", params.secret).update(payload).digest("hex")}`;
+  const a = Buffer.from(params.headerSig);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
