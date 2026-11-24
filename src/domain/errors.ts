@@ -56,6 +56,15 @@ export class ConflictError extends AppError {
   }
 }
 
+export class LimitExceededError extends AppError {
+  readonly code = "LIMIT_EXCEEDED";
+  readonly statusCode = 429;
+
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, { retryable: false, details });
+  }
+}
+
 export class RpcError extends AppError {
   readonly code = "RPC_ERROR";
   readonly statusCode: number;

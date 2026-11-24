@@ -1,5 +1,6 @@
 import { type Address, isAddress, isSignature, type Signature } from "@solana/kit";
 import { z } from "zod";
+import { sanitizeControlChars } from "../security/sanitize.js";
 import { ValidationError } from "./errors.js";
 
 declare const solwatchBrand: unique symbol;
@@ -107,7 +108,9 @@ export function tryParseWalletAddress(raw: string): WalletAddress | null {
 export function parseWalletAddress(raw: string): WalletAddress {
   const parsed = tryParseWalletAddress(raw);
   if (parsed === null) {
-    throw new ValidationError(`Invalid Solana wallet address: "${raw}"`, { field: "wallet" });
+    throw new ValidationError(`Invalid Solana wallet address: "${sanitizeControlChars(raw, 64)}"`, {
+      field: "wallet",
+    });
   }
   return parsed;
 }
@@ -120,7 +123,9 @@ export function tryParseMintAddress(raw: string): MintAddress | null {
 export function parseMintAddress(raw: string): MintAddress {
   const parsed = tryParseMintAddress(raw);
   if (parsed === null) {
-    throw new ValidationError(`Invalid Solana mint address: "${raw}"`, { field: "mint" });
+    throw new ValidationError(`Invalid Solana mint address: "${sanitizeControlChars(raw, 64)}"`, {
+      field: "mint",
+    });
   }
   return parsed;
 }
@@ -128,9 +133,12 @@ export function parseMintAddress(raw: string): MintAddress {
 export function parseTxSignature(raw: string): TxSignature {
   const trimmed = raw.trim();
   if (!isSignature(trimmed)) {
-    throw new ValidationError(`Invalid Solana transaction signature: "${raw}"`, {
-      field: "signature",
-    });
+    throw new ValidationError(
+      `Invalid Solana transaction signature: "${sanitizeControlChars(raw, 64)}"`,
+      {
+        field: "signature",
+      },
+    );
   }
   return trimmed as TxSignature;
 }
