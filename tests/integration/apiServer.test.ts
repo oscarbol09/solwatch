@@ -7,11 +7,22 @@ import type { Notifier } from "../../src/notifiers/types.js";
 import { MonitorService } from "../../src/service/monitorService.js";
 import type { SolanaRpcPort } from "../../src/solana/rpcClient.js";
 import { SqliteStore } from "../../src/store/sqliteStore.js";
-import { HELIUS_WEBHOOK_FIXTURE, WATCHED_WALLET_A } from "../fixtures/solanaTransactions.js";
+import {
+  COUNTERPARTY_WALLET,
+  HELIUS_WEBHOOK_FIXTURE,
+  WATCHED_WALLET_A,
+} from "../fixtures/solanaTransactions.js";
 
 const walletA = parseWalletAddress(WATCHED_WALLET_A);
 
-function setupApiTestEnv(options: { apiToken?: string; heliusSecret?: string } = {}) {
+function setupApiTestEnv(
+  options: {
+    apiToken?: string;
+    heliusSecret?: string;
+    maxWatchedWallets?: number;
+    rateLimitMax?: number;
+  } = {},
+) {
   const store = new SqliteStore(":memory:");
   const delivered: string[] = [];
   const fakeNotifier: Notifier = {
@@ -38,6 +49,7 @@ function setupApiTestEnv(options: { apiToken?: string; heliusSecret?: string } =
       logger: createLogger("silent"),
     }),
     logger: createLogger("silent"),
+    maxWatchedWallets: options.maxWatchedWallets,
   });
   service.ensureDefaultGlobalRule({
     minSolLamports: 100_000_000n,
@@ -51,6 +63,8 @@ function setupApiTestEnv(options: { apiToken?: string; heliusSecret?: string } =
     cluster: "mainnet-beta",
     apiToken: options.apiToken,
     heliusWebhookSecret: options.heliusSecret,
+    rateLimitMax: options.rateLimitMax,
+    rateLimitKeyGenerator: () => "test-client",
     getWatcherStatus: () => ({
       running: true,
       watchedCount: store.listWallets(true).length,
@@ -64,14 +78,27 @@ function setupApiTestEnv(options: { apiToken?: string; heliusSecret?: string } =
 }
 
 describe("HTTP API server (Hono)", () => {
-  it("exposes /healthz publicly and manages wallets + alerts with strict validation", async () => {
+  it("exposes minimal /healthz publicly and puts operational status behind /api/status auth", async () => {
     const { app, store } = setupApiTestEnv({ apiToken: "secret-api-token" });
 
     const health = await app.request("/healthz");
     expect(health.status).toBe(200);
-    const healthJson = (await health.json()) as { status: string; channels: string[] };
-    expect(healthJson.status).toBe("ok");
-    expect(healthJson.channels).toEqual(["memory"]);
+    expect(health.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(health.headers.get("x-frame-options")).toBe("DENY");
+    expect(health.headers.get("content-security-policy")).toContain("default-src 'none'");
+    const healthJson = (await health.json()) as Record<string, unknown>;
+    expect(healthJson).toEqual({ status: "ok" });
+
+    // Operational telemetry must require Bearer token when API_TOKEN is configured
+    expect((await app.request("/api/status")).status).toBe(401);
+    const statusRes = await app.request("/api/status", {
+      headers: { Authorization: "Bearer secret-api-token" },
+    });
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.headers.get("cache-control")).toBe("no-store");
+    const statusJson = (await statusRes.json()) as { status: string; channels: string[] };
+    expect(statusJson.status).toBe("ok");
+    expect(statusJson.channels).toEqual(["memory"]);
 
     // Unauthenticated /api/* must return 401 when apiToken is configured
     const unauth = await app.request("/api/wallets");
@@ -87,7 +114,14 @@ describe("HTTP API server (Hono)", () => {
       "Content-Type": "application/json",
     };
 
-    // Invalid address -> 400
+    // Unknown fields rejected (.strict()) and invalid address -> 400
+    const strictField = await app.request("/api/wallets", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ address: WATCHED_WALLET_A, unexpected: true }),
+    });
+    expect(strictField.status).toBe(400);
+
     const badCreate = await app.request("/api/wallets", {
       method: "POST",
       headers: authHeaders,
@@ -95,13 +129,26 @@ describe("HTTP API server (Hono)", () => {
     });
     expect(badCreate.status).toBe(400);
 
-    // Valid address -> 201
+    // Non-JSON Content-Type rejected with 415
+    const wrongContentType = await app.request("/api/wallets", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer secret-api-token",
+        "Content-Type": "text/plain",
+      },
+      body: JSON.stringify({ address: WATCHED_WALLET_A }),
+    });
+    expect(wrongContentType.status).toBe(415);
+
+    // Valid address with control chars -> 201 with sanitized label
     const created = await app.request("/api/wallets", {
       method: "POST",
       headers: authHeaders,
-      body: JSON.stringify({ address: WATCHED_WALLET_A, label: "Treasury" }),
+      body: JSON.stringify({ address: WATCHED_WALLET_A, label: "\u001b[31mTreasury\u001b[0m" }),
     });
     expect(created.status).toBe(201);
+    const createdJson = (await created.json()) as { wallet: { label: string | null } };
+    expect(createdJson.wallet.label).toBe("Treasury");
 
     // Duplicate -> 409
     const dup = await app.request("/api/wallets", {
@@ -128,10 +175,67 @@ describe("HTTP API server (Hono)", () => {
     });
     expect(delMissing.status).toBe(404);
 
+    // Unknown route -> 404 JSON with security headers
+    const unknownRoute = await app.request("/unknown-path");
+    expect(unknownRoute.status).toBe(404);
+    expect(unknownRoute.headers.get("x-content-type-options")).toBe("nosniff");
+
     store.close();
   });
 
-  it("authenticates Helius webhooks and routes matching events into MonitorService", async () => {
+  it("enforces wallet capacity caps, JSON 413 payload limits, and per-client rate limits", async () => {
+    const { app, store } = setupApiTestEnv({
+      apiToken: "secret-api-token",
+      maxWatchedWallets: 1,
+      rateLimitMax: 4,
+    });
+    const authHeaders = {
+      Authorization: "Bearer secret-api-token",
+      "Content-Type": "application/json",
+    };
+
+    const first = await app.request("/api/wallets", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ address: WATCHED_WALLET_A }),
+    });
+    expect(first.status).toBe(201);
+
+    const capExceeded = await app.request("/api/wallets", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ address: COUNTERPARTY_WALLET }),
+    });
+    expect(capExceeded.status).toBe(429);
+
+    const oversized = await app.request("/api/wallets", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ address: WATCHED_WALLET_A, label: "x".repeat(300 * 1024) }),
+    });
+    expect(oversized.status).toBe(413);
+    const oversizedJson = (await oversized.json()) as { error: string };
+    expect(oversizedJson.error).toBe("PAYLOAD_TOO_LARGE");
+
+    expect((await app.request("/healthz")).status).toBe(200);
+    const rateLimited = await app.request("/healthz");
+    expect(rateLimited.status).toBe(429);
+    expect(rateLimited.headers.get("retry-after")).toBeTruthy();
+
+    store.close();
+  });
+
+  it("disables /webhooks/helius when secret is missing and authenticates signed batches when configured", async () => {
+    const disabledEnv = setupApiTestEnv({});
+    const disabledRes = await disabledEnv.app.request("/webhooks/helius", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(HELIUS_WEBHOOK_FIXTURE),
+    });
+    expect(disabledRes.status).toBe(503);
+    expect(disabledRes.headers.get("x-content-type-options")).toBe("nosniff");
+    disabledEnv.store.close();
+
     const { app, store, delivered, service } = setupApiTestEnv({
       heliusSecret: "helius-hook-secret",
     });
@@ -143,6 +247,16 @@ describe("HTTP API server (Hono)", () => {
       body: JSON.stringify(HELIUS_WEBHOOK_FIXTURE),
     });
     expect(unauth.status).toBe(401);
+
+    const wrongType = await app.request("/webhooks/helius", {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain",
+        Authorization: "helius-hook-secret",
+      },
+      body: JSON.stringify(HELIUS_WEBHOOK_FIXTURE),
+    });
+    expect(wrongType.status).toBe(415);
 
     const payloadWithOneBadTx = [
       ...HELIUS_WEBHOOK_FIXTURE,
@@ -199,9 +313,10 @@ describe("HTTP API server (Hono)", () => {
 
     store.close();
 
-    // Closed SQLite triggers an unhandled infrastructure error -> sanitized 500 response
+    // Closed SQLite triggers an unhandled infrastructure error -> sanitized 500 response with security headers
     const internalErrRes = await app.request("/api/wallets");
     expect(internalErrRes.status).toBe(500);
+    expect(internalErrRes.headers.get("x-content-type-options")).toBe("nosniff");
     const internalBody = (await internalErrRes.json()) as { error: string; message: string };
     expect(internalBody.error).toBe("INTERNAL_SERVER_ERROR");
     expect(internalBody.message).not.toContain("SQLite");

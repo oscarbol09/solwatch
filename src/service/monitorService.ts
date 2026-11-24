@@ -1,4 +1,5 @@
 import { ASSOCIATED_TOKEN_PROGRAM, classifyParsedTransaction } from "../domain/classifier.js";
+import { LimitExceededError } from "../domain/errors.js";
 import { type CooldownStore, evaluateAlertRules } from "../domain/rules.js";
 import {
   type AlertRule,
@@ -13,6 +14,7 @@ import {
 import type { AppLogger } from "../logger.js";
 import type { AlertDispatcher } from "../notifiers/dispatcher.js";
 import type { DeliveryResult } from "../notifiers/types.js";
+import { sanitizeControlChars } from "../security/sanitize.js";
 import type { SolanaRpcPort } from "../solana/rpcClient.js";
 import type { SignatureEventMeta } from "../solana/watcher.js";
 import type { SqliteStore } from "../store/sqliteStore.js";
@@ -56,6 +58,7 @@ export type MonitorServiceOptions = {
   readonly logger: AppLogger;
   readonly watchControl?: WalletWatchControl | undefined;
   readonly nowMs?: (() => number) | undefined;
+  readonly maxWatchedWallets?: number | undefined;
   readonly maxDirectQueueSize?: number | undefined;
   readonly directWorkerConcurrency?: number | undefined;
   readonly outboxIntervalMs?: number | undefined;
@@ -97,6 +100,7 @@ export class MonitorService {
   private readonly logger: AppLogger;
   private readonly cooldownStore: CooldownStore;
   private readonly nowMs: () => number;
+  private readonly maxWatchedWallets: number;
   private readonly maxDirectQueueSize: number;
   private readonly directWorkerConcurrency: number;
   private readonly outboxIntervalMs: number;
@@ -134,6 +138,7 @@ export class MonitorService {
     this.logger = options.logger;
     this.cooldownStore = new SqliteCooldownStore(this.store);
     this.nowMs = options.nowMs ?? Date.now;
+    this.maxWatchedWallets = Math.max(1, options.maxWatchedWallets ?? 100);
     this.maxDirectQueueSize = Math.max(10, options.maxDirectQueueSize ?? 2_000);
     this.directWorkerConcurrency = Math.max(1, options.directWorkerConcurrency ?? 4);
     this.outboxIntervalMs = options.outboxIntervalMs ?? 5_000;
@@ -185,9 +190,19 @@ export class MonitorService {
   }
 
   async addWallet(address: WalletAddress, label: string | null = null): Promise<WatchedWallet> {
-    const created = this.store.createWallet(address, label);
+    const normalizedLabel = label !== null ? sanitizeControlChars(label, 80) || null : null;
+    if (
+      this.store.getWallet(address) === null &&
+      this.store.countWallets() >= this.maxWatchedWallets
+    ) {
+      throw new LimitExceededError(
+        `Maximum watched wallets limit (${this.maxWatchedWallets}) reached`,
+        { maxWatchedWallets: this.maxWatchedWallets },
+      );
+    }
+    const created = this.store.createWallet(address, normalizedLabel);
     await this.watchControl?.watchWallet(address);
-    this.logger.info({ wallet: address, label }, "Wallet added to watchlist");
+    this.logger.info({ wallet: address, label: normalizedLabel }, "Wallet added to watchlist");
     return created;
   }
 
@@ -196,7 +211,14 @@ export class MonitorService {
     patch: { readonly label?: string | null | undefined; readonly enabled?: boolean | undefined },
   ): Promise<WatchedWallet | null> {
     const before = this.store.getWallet(address);
-    const updated = this.store.updateWallet(address, patch);
+    const sanitizedPatch =
+      patch.label !== undefined
+        ? {
+            ...patch,
+            label: patch.label !== null ? sanitizeControlChars(patch.label, 80) || null : null,
+          }
+        : patch;
+    const updated = this.store.updateWallet(address, sanitizedPatch);
     if (!updated) return null;
 
     if (before && before.enabled !== updated.enabled) {

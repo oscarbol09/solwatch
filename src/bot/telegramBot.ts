@@ -1,14 +1,20 @@
 import { Bot, type BotConfig, type Context } from "grammy";
-import { ConflictError } from "../domain/errors.js";
+import { ConflictError, LimitExceededError } from "../domain/errors.js";
 import { shortAddress } from "../domain/tokens.js";
 import { type SolanaCluster, tryParseWalletAddress } from "../domain/types.js";
 import type { AppLogger } from "../logger.js";
+import { sanitizeControlChars } from "../security/sanitize.js";
 import type { MonitorService } from "../service/monitorService.js";
 import type { SqliteStore } from "../store/sqliteStore.js";
+
+const UNAUTHORIZED_LOG_COOLDOWN_MS = 60_000;
+const MAX_UNAUTHORIZED_LOG_KEYS = 500;
+const MAX_TELEGRAM_REPLY_CHARS = 3_800;
 
 export type TelegramBotOptions = {
   readonly botToken: string;
   readonly allowedChatIds: readonly string[];
+  readonly allowedUserIds?: readonly string[] | undefined;
   readonly service: MonitorService;
   readonly store: SqliteStore;
   readonly cluster: SolanaCluster;
@@ -21,18 +27,79 @@ export type TelegramBotOptions = {
   readonly botInfo?: BotConfig<Context>["botInfo"];
 };
 
+function formatBoundedLines(
+  header: string,
+  lines: readonly string[],
+  maxChars: number = MAX_TELEGRAM_REPLY_CHARS,
+): string {
+  const collected: string[] = [header];
+  let currentLen = header.length;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line === undefined) continue;
+    const safeLine = line.length > 300 ? `${line.slice(0, 297)}...` : line;
+    const suffixReserve = i < lines.length - 1 ? 28 : 0;
+    if (currentLen + 1 + safeLine.length + suffixReserve > maxChars) {
+      collected.push(`...and ${lines.length - i} more`);
+      break;
+    }
+    collected.push(safeLine);
+    currentLen += 1 + safeLine.length;
+  }
+
+  return collected.join("\n");
+}
+
 export function createTelegramBot(options: TelegramBotOptions): Bot {
   const bot = new Bot(options.botToken, options.botInfo ? { botInfo: options.botInfo } : undefined);
-  const allowedSet = new Set(options.allowedChatIds);
+  const allowedChatSet = new Set(options.allowedChatIds);
+  const allowedUserSet = new Set(options.allowedUserIds ?? []);
+  const unauthorizedLogAt = new Map<string, number>();
 
-  bot.use(async (ctx, next) => {
-    const chatId = ctx.chat?.id;
-    if (allowedSet.size === 0 || chatId === undefined || !allowedSet.has(String(chatId))) {
-      if (ctx.chat) {
-        await ctx.reply("Unauthorized chat. Add your chat ID to TELEGRAM_ALLOWED_CHAT_IDS.");
-      }
+  function logUnauthorizedAttempt(key: string, contextInfo: Record<string, unknown>): void {
+    const now = Date.now();
+    const lastLogged = unauthorizedLogAt.get(key);
+    if (lastLogged !== undefined && now - lastLogged < UNAUTHORIZED_LOG_COOLDOWN_MS) {
       return;
     }
+    if (unauthorizedLogAt.size >= MAX_UNAUTHORIZED_LOG_KEYS) {
+      const oldestKey = unauthorizedLogAt.keys().next().value;
+      if (oldestKey !== undefined) {
+        unauthorizedLogAt.delete(oldestKey);
+      }
+    }
+    unauthorizedLogAt.set(key, now);
+    options.logger.warn(contextInfo, "Dropped unauthorized Telegram update");
+  }
+
+  function canMutateWatchlist(ctx: Context): boolean {
+    if (!ctx.from || !ctx.chat) return false;
+    if (allowedUserSet.size > 0) {
+      return allowedUserSet.has(String(ctx.from.id));
+    }
+    return ctx.chat.type === "private" && String(ctx.chat.id) === String(ctx.from.id);
+  }
+
+  bot.use(async (ctx, next) => {
+    if (!ctx.from || ctx.from.is_bot) {
+      logUnauthorizedAttempt(`bot:${String(ctx.chat?.id ?? "unknown")}`, {
+        chatId: ctx.chat?.id,
+        userId: ctx.from?.id,
+        isBot: ctx.from?.is_bot ?? null,
+      });
+      return;
+    }
+
+    const chatId = ctx.chat?.id;
+    if (allowedChatSet.size === 0 || chatId === undefined || !allowedChatSet.has(String(chatId))) {
+      logUnauthorizedAttempt(`chat:${String(chatId ?? "unknown")}`, {
+        chatId: chatId ?? null,
+        userId: ctx.from.id,
+      });
+      return;
+    }
+
     await next();
   });
 
@@ -54,6 +121,15 @@ export function createTelegramBot(options: TelegramBotOptions): Bot {
   });
 
   bot.command("watch", async (ctx) => {
+    if (!canMutateWatchlist(ctx)) {
+      options.logger.warn(
+        { chatId: ctx.chat?.id, userId: ctx.from?.id },
+        "Rejected unauthorized Telegram /watch attempt",
+      );
+      await ctx.reply("Permission denied.");
+      return;
+    }
+
     const rawArgs = ctx.match.trim();
     if (!rawArgs) {
       await ctx.reply("Usage: /watch <solana_address> [optional label]");
@@ -64,11 +140,11 @@ export function createTelegramBot(options: TelegramBotOptions): Bot {
     const rawAddr = parts[0] ?? "";
     const parsedAddress = tryParseWalletAddress(rawAddr);
     if (parsedAddress === null) {
-      await ctx.reply(`Invalid Solana wallet address: ${rawAddr}`);
+      await ctx.reply(`Invalid Solana wallet address: ${sanitizeControlChars(rawAddr, 48)}`);
       return;
     }
 
-    const label = parts.slice(1).join(" ").trim() || null;
+    const label = sanitizeControlChars(parts.slice(1).join(" "), 80) || null;
     try {
       await options.service.addWallet(parsedAddress, label);
       const display = label
@@ -80,11 +156,24 @@ export function createTelegramBot(options: TelegramBotOptions): Bot {
         await ctx.reply(`Wallet ${shortAddress(parsedAddress)} is already watched.`);
         return;
       }
+      if (err instanceof LimitExceededError) {
+        await ctx.reply("Wallet limit reached. Remove a tracked wallet before adding another.");
+        return;
+      }
       throw err;
     }
   });
 
   bot.command("unwatch", async (ctx) => {
+    if (!canMutateWatchlist(ctx)) {
+      options.logger.warn(
+        { chatId: ctx.chat?.id, userId: ctx.from?.id },
+        "Rejected unauthorized Telegram /unwatch attempt",
+      );
+      await ctx.reply("Permission denied.");
+      return;
+    }
+
     const rawAddr = ctx.match.trim();
     const parsedAddress = tryParseWalletAddress(rawAddr);
     if (parsedAddress === null) {
@@ -107,11 +196,12 @@ export function createTelegramBot(options: TelegramBotOptions): Bot {
       return;
     }
     const lines = wallets.map((w, idx) => {
-      const labelPart = w.label ? `${w.label} — ` : "";
+      const safeLabel = w.label ? sanitizeControlChars(w.label, 80) : "";
+      const labelPart = safeLabel ? `${safeLabel} — ` : "";
       const state = w.enabled ? "active" : "paused";
       return `${idx + 1}. ${labelPart}${shortAddress(w.address)} (${state})`;
     });
-    await ctx.reply(`Tracked wallets (${wallets.length}):\n${lines.join("\n")}`);
+    await ctx.reply(formatBoundedLines(`Tracked wallets (${wallets.length}):`, lines));
   });
 
   bot.command("recent", async (ctx) => {
@@ -121,9 +211,10 @@ export function createTelegramBot(options: TelegramBotOptions): Bot {
       return;
     }
     const lines = recent.map(
-      (a) => `[${a.status}] ${shortAddress(a.walletAddress)} via ${a.channel}: ${a.summary}`,
+      (a) =>
+        `[${sanitizeControlChars(a.status, 16)}] ${shortAddress(a.walletAddress)} via ${sanitizeControlChars(a.channel, 24)}: ${sanitizeControlChars(a.summary, 200)}`,
     );
-    await ctx.reply(`Recent alerts:\n${lines.join("\n")}`);
+    await ctx.reply(formatBoundedLines("Recent alerts:", lines));
   });
 
   bot.command("status", async (ctx) => {

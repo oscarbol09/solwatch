@@ -116,6 +116,7 @@ async function main(): Promise<void> {
         new WebhookNotifier({
           url: config.webhookUrl,
           secret: config.webhookSecret,
+          allowPrivateHosts: config.allowPrivateWebhookUrls,
         }),
       );
     }
@@ -136,6 +137,7 @@ async function main(): Promise<void> {
       rpcPort: rpcClient,
       dispatcher,
       logger,
+      maxWatchedWallets: config.maxWatchedWallets,
     });
 
     service.ensureDefaultGlobalRule({
@@ -166,6 +168,7 @@ async function main(): Promise<void> {
         ? createTelegramBot({
             botToken: config.telegramBotToken,
             allowedChatIds: config.telegramAllowedChatIds,
+            allowedUserIds: config.telegramAllowedUserIds,
             service,
             store,
             cluster: config.solanaCluster,
@@ -186,6 +189,9 @@ async function main(): Promise<void> {
       cluster: config.solanaCluster,
       apiToken: config.apiToken,
       heliusWebhookSecret: config.heliusWebhookSecret,
+      trustProxy: config.trustProxy,
+      rateLimitMax: config.apiRateLimitMax,
+      rateLimitWindowMs: config.apiRateLimitWindowMs,
       getWatcherStatus: () => activeWatcher.getStatus(),
       channels: dispatcher.getChannels(),
       logger,

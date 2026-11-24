@@ -9,22 +9,40 @@ import { AlertDispatcher } from "../../src/notifiers/dispatcher.js";
 import { MonitorService } from "../../src/service/monitorService.js";
 import type { SolanaRpcPort } from "../../src/solana/rpcClient.js";
 import { SqliteStore } from "../../src/store/sqliteStore.js";
-import { SIG_SOL_IN, WATCHED_WALLET_A } from "../fixtures/solanaTransactions.js";
+import {
+  COUNTERPARTY_WALLET,
+  SIG_SOL_IN,
+  WATCHED_WALLET_A,
+} from "../fixtures/solanaTransactions.js";
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-function makeTextUpdate(updateId: number, chatId: number, text: string): Update {
+function makeTextUpdate(
+  updateId: number,
+  chatId: number,
+  text: string,
+  options: {
+    userId?: number;
+    isBot?: boolean;
+    chatType?: "private" | "supergroup";
+  } = {},
+): Update {
   const commandToken = text.split(" ")[0] ?? text;
+  const userId = options.userId ?? chatId;
+  const chatType = options.chatType ?? "private";
   return {
     update_id: updateId,
     message: {
       message_id: updateId,
       date: 1_760_000_000,
-      chat: { id: chatId, type: "private", first_name: "Tester" },
-      from: { id: chatId, is_bot: false, first_name: "Tester" },
+      chat:
+        chatType === "supergroup"
+          ? { id: chatId, type: "supergroup", title: "Solwatch Group" }
+          : { id: chatId, type: "private", first_name: "Tester" },
+      from: { id: userId, is_bot: options.isBot ?? false, first_name: "Tester" },
       text,
       ...(text.startsWith("/")
         ? { entities: [{ offset: 0, length: commandToken.length, type: "bot_command" }] }
@@ -34,7 +52,7 @@ function makeTextUpdate(updateId: number, chatId: number, text: string): Update 
 }
 
 describe("Telegram interactive bot (grammY + MSW)", () => {
-  it("handles /start, /watch, /list, /status, /unwatch, and enforces chat allowlist", async () => {
+  it("handles commands, drops unauthorized/bot updates silently, and enforces group admin ACLs + bounds", async () => {
     const replies: string[] = [];
     server.use(
       http.post("https://api.telegram.org/botBOT_TOKEN/sendMessage", async ({ request }) => {
@@ -71,6 +89,7 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
         logger: createLogger("silent"),
       }),
       logger: createLogger("silent"),
+      maxWatchedWallets: 2,
     });
 
     const bot = createTelegramBot({
@@ -105,9 +124,10 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
       },
     });
 
-    // Unauthorized chat -> denied
+    // Unauthorized chat and bot senders must be dropped silently (0 outbound replies)
     await bot.handleUpdate(makeTextUpdate(1, 9999, "/status"));
-    expect(replies.at(-1)).toContain("Unauthorized chat");
+    await bot.handleUpdate(makeTextUpdate(10, 1001, "/status", { isBot: true }));
+    expect(replies).toHaveLength(0);
 
     await bot.handleUpdate(makeTextUpdate(2, 1001, "/start"));
     expect(replies.at(-1)).toContain("/watch");
@@ -121,9 +141,12 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
     await bot.handleUpdate(makeTextUpdate(22, 1001, "/watch"));
     expect(replies.at(-1)).toContain("Usage: /watch");
 
-    await bot.handleUpdate(makeTextUpdate(3, 1001, `/watch ${WATCHED_WALLET_A} Treasury`));
+    const dirtyLabel = `\u001b[31mTreasury\u001b[0m ${"X".repeat(120)}`;
+    await bot.handleUpdate(makeTextUpdate(3, 1001, `/watch ${WATCHED_WALLET_A} ${dirtyLabel}`));
     expect(replies.at(-1)).toContain("Now watching");
-    expect(store.listWallets()).toHaveLength(1);
+    const saved = store.listWallets()[0];
+    expect(saved?.label?.length).toBeLessThanOrEqual(80);
+    expect(saved?.label).not.toContain("\u001b");
 
     await bot.handleUpdate(makeTextUpdate(23, 1001, `/watch ${WATCHED_WALLET_A}`));
     expect(replies.at(-1)).toContain("already watched");
@@ -161,7 +184,8 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
     await bot.handleUpdate(makeTextUpdate(8, 1001, "/watch bad-addr"));
     expect(replies.at(-1)).toContain("Invalid Solana wallet");
 
-    // Empty allowlist must fail closed rather than allowing public commands
+    // Empty allowlist fails closed silently (0 extra replies)
+    const countBeforeLocked = replies.length;
     const lockedBot = createTelegramBot({
       botToken: "BOT_TOKEN",
       allowedChatIds: [],
@@ -173,7 +197,79 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
       botInfo: bot.botInfo,
     });
     await lockedBot.handleUpdate(makeTextUpdate(9, 1001, "/list"));
-    expect(replies.at(-1)).toContain("Unauthorized chat");
+    expect(replies).toHaveLength(countBeforeLocked);
+
+    // Group chat ACL: read commands permitted in allowlisted group, mutations scoped to allowedUserIds
+    const groupBotNoAdmins = createTelegramBot({
+      botToken: "BOT_TOKEN",
+      allowedChatIds: ["-100555"],
+      service,
+      store,
+      cluster: "mainnet-beta",
+      getStatus: () => ({ running: true, watchedCount: 0, reconnectsTotal: 0 }),
+      logger: createLogger("silent"),
+      botInfo: bot.botInfo,
+    });
+    await groupBotNoAdmins.handleUpdate(
+      makeTextUpdate(30, -100555, `/watch ${WATCHED_WALLET_A}`, {
+        userId: 777,
+        chatType: "supergroup",
+      }),
+    );
+    expect(replies.at(-1)).toBe("Permission denied.");
+    expect(store.listWallets()).toHaveLength(0);
+
+    const groupBotWithAdmins = createTelegramBot({
+      botToken: "BOT_TOKEN",
+      allowedChatIds: ["-100555"],
+      allowedUserIds: ["777"],
+      service,
+      store,
+      cluster: "mainnet-beta",
+      getStatus: () => ({ running: true, watchedCount: store.countWallets(), reconnectsTotal: 0 }),
+      logger: createLogger("silent"),
+      botInfo: bot.botInfo,
+    });
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(31, -100555, `/watch ${WATCHED_WALLET_A} GroupAdmin`, {
+        userId: 888,
+        chatType: "supergroup",
+      }),
+    );
+    expect(replies.at(-1)).toBe("Permission denied.");
+
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(32, -100555, `/watch ${WATCHED_WALLET_A} GroupAdmin`, {
+        userId: 777,
+        chatType: "supergroup",
+      }),
+    );
+    expect(replies.at(-1)).toContain("Now watching");
+
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(33, -100555, `/watch ${COUNTERPARTY_WALLET} Second`, {
+        userId: 777,
+        chatType: "supergroup",
+      }),
+    );
+    expect(replies.at(-1)).toContain("Now watching");
+
+    // 3rd distinct wallet exceeds maxWatchedWallets=2
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(34, -100555, "/watch 11111111111111111111111111111111 Third", {
+        userId: 777,
+        chatType: "supergroup",
+      }),
+    );
+    expect(replies.at(-1)).toContain("Wallet limit reached");
+
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(35, -100555, `/unwatch ${WATCHED_WALLET_A}`, {
+        userId: 888,
+        chatType: "supergroup",
+      }),
+    );
+    expect(replies.at(-1)).toBe("Permission denied.");
 
     store.close();
   });
