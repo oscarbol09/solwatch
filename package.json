@@ -5,6 +5,27 @@
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
+  "author": "Oscar Bolaños <oscarbol09@gmail.com>",
+  "homepage": "https://github.com/oscarbol09/solwatch#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oscarbol09/solwatch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/oscarbol09/solwatch/issues"
+  },
+  "keywords": [
+    "solana",
+    "solana-tracker",
+    "whale-alerts",
+    "telegram-bot",
+    "sqlite-wal",
+    "helius",
+    "jupiter-api",
+    "self-hosted",
+    "web3",
+    "typescript"
+  ],
   "engines": {
     "node": ">=24.0.0"
   },
