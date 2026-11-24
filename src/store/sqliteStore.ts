@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { z } from "zod";
 import { ConflictError } from "../domain/errors.js";
@@ -1206,6 +1206,25 @@ export class SqliteStore {
   checkpoint(mode: "PASSIVE" | "TRUNCATE" = "PASSIVE"): void {
     if (!this.fileBacked || this.closed) return;
     this.db.exec(`PRAGMA wal_checkpoint(${mode});`);
+  }
+
+  backup(targetPath: string): void {
+    if (this.closed) {
+      throw new Error("Cannot backup a closed database");
+    }
+    if (!targetPath || targetPath.trim() === "") {
+      throw new Error("Target backup path must be a non-empty string");
+    }
+    const resolvedPath = resolve(targetPath);
+    mkdirSync(dirname(resolvedPath), { recursive: true, mode: 0o700 });
+    this.db.prepare("VACUUM INTO ?").run(resolvedPath);
+    if (process.platform !== "win32") {
+      try {
+        chmodSync(resolvedPath, 0o600);
+      } catch {
+        // Best-effort permission lockdown
+      }
+    }
   }
 
   optimize(): void {

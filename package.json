@@ -12,6 +12,7 @@
     "dev": "node --env-file-if-exists=.env --import tsx src/index.ts",
     "dev:pretty": "node --env-file-if-exists=.env --import tsx src/index.ts | pino-pretty",
     "demo": "node --env-file-if-exists=.env --import tsx src/demo.ts",
+    "backup": "node --env-file-if-exists=.env --import tsx src/scripts/backup.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node --enable-source-maps --env-file-if-exists=.env dist/index.js",
     "typecheck": "tsc --noEmit",

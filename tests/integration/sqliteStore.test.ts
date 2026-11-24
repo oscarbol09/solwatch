@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConflictError } from "../../src/domain/errors.js";
@@ -416,5 +416,25 @@ describe("SqliteStore", () => {
       },
     ]);
     expect(store.countPendingOutbox()).toBe(0);
+  });
+
+  it("supports ping probes and online backup validation", () => {
+    const store = new SqliteStore(":memory:");
+    expect(store.ping()).toBe(true);
+
+    const tempBackup = resolve("./tests/test_store_backup.db");
+    try {
+      store.backup(tempBackup);
+      expect(existsSync(tempBackup)).toBe(true);
+      expect(() => store.backup("")).toThrow("non-empty string");
+    } finally {
+      if (existsSync(tempBackup)) {
+        unlinkSync(tempBackup);
+      }
+    }
+
+    store.close();
+    expect(store.ping()).toBe(false);
+    expect(() => store.backup("./dummy.db")).toThrow("Cannot backup a closed database");
   });
 });
