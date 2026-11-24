@@ -63,6 +63,14 @@ jobs:
       - name: Run unit and integration tests with coverage
         run: npm run test:coverage
 
+      - name: Upload test results and coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-results-and-coverage
+          path: coverage/
+          retention-days: 14
+
       - name: Build TypeScript output
         run: npm run build
 
