@@ -3,7 +3,7 @@ import type { OnChainEvent, SolanaCluster } from "../domain/types.js";
 import type { AppLogger } from "../logger.js";
 import { sanitizeSecretText } from "../security/sanitize.js";
 import type { NewDeliveryRecord, SqliteStore } from "../store/sqliteStore.js";
-import { buildAlertEnvelope, summarizeEvent } from "./format.js";
+import { type BuildAlertEnvelopeOptions, buildAlertEnvelope, summarizeEvent } from "./format.js";
 import type { DeliveryResult, Notifier } from "./types.js";
 
 export type AlertDispatcherOptions = {
@@ -39,8 +39,9 @@ export class AlertDispatcher {
     event: OnChainEvent,
     walletLabel: string | null,
     signal?: AbortSignal,
+    envelopeOptions: BuildAlertEnvelopeOptions = {},
   ): Promise<readonly DeliveryResult[]> {
-    const tracked = await this.dispatchTracked(event, walletLabel, signal);
+    const tracked = await this.dispatchTracked(event, walletLabel, signal, envelopeOptions);
     return tracked.results;
   }
 
@@ -48,14 +49,21 @@ export class AlertDispatcher {
     event: OnChainEvent,
     walletLabel: string | null,
     signal?: AbortSignal,
+    envelopeOptions: BuildAlertEnvelopeOptions = {},
   ): Promise<TrackedDispatchResult> {
     const deliveryId = randomUUID();
     if (this.notifiers.length === 0) {
       return { deliveryId, results: [] };
     }
 
-    const summary = summarizeEvent(event);
-    const envelope = buildAlertEnvelope(event, walletLabel, this.cluster, deliveryId);
+    const summary = summarizeEvent(event, envelopeOptions.estimatedUsd);
+    const envelope = buildAlertEnvelope(
+      event,
+      walletLabel,
+      this.cluster,
+      deliveryId,
+      envelopeOptions,
+    );
     const settled = await Promise.allSettled(
       this.notifiers.map(async (notifier) => {
         await notifier.send(envelope, signal);
@@ -116,6 +124,7 @@ export class AlertDispatcher {
     walletLabel: string | null,
     deliveryId: string,
     signal?: AbortSignal,
+    envelopeOptions: BuildAlertEnvelopeOptions = {},
   ): Promise<DeliveryResult> {
     const notifier = this.notifiers.find((n) => n.channel === channelName);
     if (!notifier) {
@@ -126,8 +135,14 @@ export class AlertDispatcher {
       };
     }
 
-    const summary = summarizeEvent(event);
-    const envelope = buildAlertEnvelope(event, walletLabel, this.cluster, deliveryId);
+    const summary = summarizeEvent(event, envelopeOptions.estimatedUsd);
+    const envelope = buildAlertEnvelope(
+      event,
+      walletLabel,
+      this.cluster,
+      deliveryId,
+      envelopeOptions,
+    );
     try {
       await notifier.send(envelope, signal);
       this.store.recordDelivery({

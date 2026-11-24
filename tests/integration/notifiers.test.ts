@@ -50,6 +50,7 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
     const notifier = new TelegramNotifier({
       botToken: "TEST_TOKEN",
       chatId: "-10012345",
+      messageThreadId: 77,
       maxRetries: 1,
       sleep: async (ms) => {
         sleeps.push(ms);
@@ -57,14 +58,20 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
     });
 
     const event = classifyParsedTransaction(makeJupiterSwapTx(), watched);
-    const envelope = buildAlertEnvelope(event, "Alpha Vault", "mainnet-beta", "del_tg_1");
+    const envelope = buildAlertEnvelope(event, "Alpha Vault", "mainnet-beta", "del_tg_1", {
+      estimatedUsd: 240,
+      source: "websocket",
+    });
     await notifier.send(envelope);
 
     expect(calls).toBe(2);
     expect(sleeps).toEqual([1_000]);
     expect(capturedBody?.chat_id).toBe("-10012345");
+    expect(capturedBody?.message_thread_id).toBe(77);
     expect(capturedBody?.parse_mode).toBe("HTML");
-    expect(JSON.stringify(capturedBody?.reply_markup)).toContain(envelope.explorerUrl);
+    const kbText = JSON.stringify(capturedBody?.reply_markup);
+    expect(kbText).toContain(envelope.explorerUrl);
+    expect(kbText).toContain("dexscreener.com/solana/");
   });
 
   it("delivers Discord embed with disabled mentions and honors Retry-After on HTTP 429", async () => {

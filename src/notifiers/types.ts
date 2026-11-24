@@ -17,6 +17,8 @@ export type AlertEnvelope = {
   readonly event: OnChainEvent;
   readonly summary: string;
   readonly explorerUrl: string;
+  readonly estimatedUsd?: number | null | undefined;
+  readonly source?: "websocket" | "backfill" | "webhook" | "test" | undefined;
 };
 
 export type DeliveryResult = {

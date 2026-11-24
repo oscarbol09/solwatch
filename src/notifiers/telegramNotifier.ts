@@ -1,5 +1,11 @@
 import { ValidationError } from "../domain/errors.js";
-import { formatTelegramHtml } from "./format.js";
+import { WSOL_MINT } from "../domain/tokens.js";
+import {
+  dexScreenerTokenUrl,
+  formatTelegramHtml,
+  solscanAccountUrl,
+  solscanTokenUrl,
+} from "./format.js";
 import { type AlertEnvelope, type Notifier, postJsonWithRetry } from "./types.js";
 
 const UNSAFE_BOT_TOKEN_RE = /[\s/?#@]/;
@@ -7,11 +13,39 @@ const UNSAFE_BOT_TOKEN_RE = /[\s/?#@]/;
 export type TelegramNotifierOptions = {
   readonly botToken: string;
   readonly chatId: string;
+  readonly messageThreadId?: number | undefined;
   readonly timeoutMs?: number | undefined;
   readonly maxRetries?: number | undefined;
   readonly sleep?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
   readonly rng?: (() => number) | undefined;
 };
+
+type InlineButton = { readonly text: string; readonly url: string };
+
+function buildAlertKeyboard(envelope: AlertEnvelope): readonly (readonly InlineButton[])[] {
+  const rows: InlineButton[][] = [
+    [
+      { text: "View on Solscan", url: envelope.explorerUrl },
+      { text: "Wallet", url: solscanAccountUrl(envelope.event.wallet, envelope.cluster) },
+    ],
+  ];
+
+  const ev = envelope.event;
+  if (ev.kind === "spl_transfer") {
+    rows.push([
+      { text: "Token", url: solscanTokenUrl(ev.mint, envelope.cluster) },
+      { text: "DexScreener", url: dexScreenerTokenUrl(ev.mint) },
+    ]);
+  } else if (ev.kind === "dex_swap") {
+    const primaryMint = ev.tokenOut.mint !== WSOL_MINT ? ev.tokenOut.mint : ev.tokenIn.mint;
+    rows.push([
+      { text: "Token", url: solscanTokenUrl(primaryMint, envelope.cluster) },
+      { text: "DexScreener", url: dexScreenerTokenUrl(primaryMint) },
+    ]);
+  }
+
+  return rows;
+}
 
 export class TelegramNotifier implements Notifier {
   readonly channel = "telegram";
@@ -30,15 +64,18 @@ export class TelegramNotifier implements Notifier {
 
   async send(envelope: AlertEnvelope, signal?: AbortSignal): Promise<void> {
     const endpoint = `https://api.telegram.org/bot${this.options.botToken}/sendMessage`;
-    const payload = {
+    const payload: Record<string, unknown> = {
       chat_id: this.options.chatId,
       text: formatTelegramHtml(envelope),
       parse_mode: "HTML",
       link_preview_options: { is_disabled: true },
       reply_markup: {
-        inline_keyboard: [[{ text: "View on Solscan", url: envelope.explorerUrl }]],
+        inline_keyboard: buildAlertKeyboard(envelope),
       },
     };
+    if (this.options.messageThreadId !== undefined) {
+      payload.message_thread_id = this.options.messageThreadId;
+    }
 
     await postJsonWithRetry({
       channel: this.channel,

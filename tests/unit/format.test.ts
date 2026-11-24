@@ -108,4 +108,30 @@ describe("alert formatters", () => {
     expect(consoleCard).not.toContain("\u001b");
     expect(consoleCard).toContain("Fake");
   });
+
+  it("renders USD valuations, source badges, swap color 0x9945ff, and v1.1 webhook fields", () => {
+    const swapEvent = classifyParsedTransaction(makeJupiterSwapTx(), watched);
+    const envelope = buildAlertEnvelope(swapEvent, "Alpha", "devnet", "del_v11", {
+      estimatedUsd: 240.5,
+      source: "backfill",
+    });
+
+    expect(envelope.summary).toContain("(~$240.50)");
+    const html = formatTelegramHtml(envelope);
+    expect(html).toContain("[BACKFILL]");
+    expect(html).toContain("[DEVNET]");
+    expect(html).toContain("solscan.io/account/");
+
+    const discord = formatDiscordEmbed(envelope);
+    expect(discord.embeds[0]?.color).toBe(0x9945ff);
+    expect(discord.embeds[0]?.footer.text).toContain("BACKFILL");
+    expect(discord.embeds[0]?.fields.some((f) => f.name === "Est. Value")).toBe(true);
+
+    const payload = formatWebhookPayload(envelope);
+    expect(payload.schemaVersion).toBe("1.1");
+    expect(payload.source).toBe("backfill");
+    expect(payload.estimatedUsd).toBe(240.5);
+    expect("tokenIn" in payload.event ? payload.event.tokenIn.uiAmount : "").toBe("1.5");
+    expect(formatConsoleLine(envelope)).toContain("[BACKFILL]");
+  });
 });

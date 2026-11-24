@@ -1,4 +1,11 @@
-import { formatLamportsAsSol, formatUnits, shortAddress } from "../domain/tokens.js";
+import {
+  formatDisplaySol,
+  formatDisplayUnits,
+  formatGroupedInteger,
+  formatUnits,
+  formatUsdValue,
+  shortAddress,
+} from "../domain/tokens.js";
 import { assertNever, type OnChainEvent, type SolanaCluster } from "../domain/types.js";
 import { escapeDiscordMarkdown, sanitizeControlChars } from "../security/sanitize.js";
 import type { AlertEnvelope } from "./types.js";
@@ -16,47 +23,90 @@ export function solscanTxUrl(signature: string, cluster: SolanaCluster): string 
   return cluster === "mainnet-beta" ? base : `${base}?cluster=${cluster}`;
 }
 
-export function summarizeEvent(event: OnChainEvent): string {
+export function solscanAccountUrl(address: string, cluster: SolanaCluster): string {
+  const base = `https://solscan.io/account/${address}`;
+  return cluster === "mainnet-beta" ? base : `${base}?cluster=${cluster}`;
+}
+
+export function solscanTokenUrl(mint: string, cluster: SolanaCluster): string {
+  const base = `https://solscan.io/token/${mint}`;
+  return cluster === "mainnet-beta" ? base : `${base}?cluster=${cluster}`;
+}
+
+export function dexScreenerTokenUrl(mint: string): string {
+  return `https://dexscreener.com/solana/${mint}`;
+}
+
+function formatUtcTimestamp(timestampSec: number | null): string | null {
+  if (
+    timestampSec === null ||
+    !Number.isFinite(timestampSec) ||
+    timestampSec < 0 ||
+    timestampSec > 8_640_000_000
+  ) {
+    return null;
+  }
+  return new Date(timestampSec * 1_000)
+    .toISOString()
+    .replace("T", " ")
+    .replace(/\.\d{3}Z$/, " UTC");
+}
+
+export function summarizeEvent(event: OnChainEvent, estimatedUsd?: number | null): string {
+  const usdSuffix =
+    estimatedUsd !== null && estimatedUsd !== undefined && Number.isFinite(estimatedUsd)
+      ? ` (~${formatUsdValue(estimatedUsd)})`
+      : "";
+
   switch (event.kind) {
     case "sol_transfer": {
       const sign = event.direction === "in" ? "+" : "-";
-      return `${sign}${formatLamportsAsSol(event.lamports)} SOL (${event.direction === "in" ? "received" : "sent"})`;
+      return `${sign}${formatDisplaySol(event.lamports)} SOL (${event.direction === "in" ? "received" : "sent"})${usdSuffix}`;
     }
     case "spl_transfer": {
       const sign = event.direction === "in" ? "+" : "-";
-      const amount = formatUnits(event.rawAmount, event.decimals);
+      const amount = formatDisplayUnits(event.rawAmount, event.decimals);
       const safeSymbol = sanitizeControlChars(event.symbol, 32) || "TOKEN";
-      return `${sign}${amount} ${safeSymbol} (${event.direction === "in" ? "received" : "sent"})`;
+      return `${sign}${amount} ${safeSymbol} (${event.direction === "in" ? "received" : "sent"})${usdSuffix}`;
     }
     case "dex_swap": {
-      const inAmt = formatUnits(event.tokenIn.rawAmount, event.tokenIn.decimals);
-      const outAmt = formatUnits(event.tokenOut.rawAmount, event.tokenOut.decimals);
+      const inAmt = formatDisplayUnits(event.tokenIn.rawAmount, event.tokenIn.decimals);
+      const outAmt = formatDisplayUnits(event.tokenOut.rawAmount, event.tokenOut.decimals);
       const safeDex = sanitizeControlChars(event.dex, 48) || "DEX";
       const safeInSymbol = sanitizeControlChars(event.tokenIn.symbol, 32) || "IN";
       const safeOutSymbol = sanitizeControlChars(event.tokenOut.symbol, 32) || "OUT";
-      return `Swap on ${safeDex}: ${inAmt} ${safeInSymbol} -> ${outAmt} ${safeOutSymbol}`;
+      return `Swap on ${safeDex}: ${inAmt} ${safeInSymbol} -> ${outAmt} ${safeOutSymbol}${usdSuffix}`;
     }
     case "program_interaction":
-      return sanitizeControlChars(event.summary, 240);
+      return `${sanitizeControlChars(event.summary, 240)}${usdSuffix}`;
     default:
       return assertNever(event);
   }
 }
+
+export type BuildAlertEnvelopeOptions = {
+  readonly estimatedUsd?: number | null | undefined;
+  readonly source?: AlertEnvelope["source"];
+};
 
 export function buildAlertEnvelope(
   event: OnChainEvent,
   walletLabel: string | null,
   cluster: SolanaCluster,
   deliveryId: string,
+  options: BuildAlertEnvelopeOptions = {},
 ): AlertEnvelope {
   const safeLabel = walletLabel !== null ? sanitizeControlChars(walletLabel, 80) || null : null;
+  const estimatedUsd = options.estimatedUsd ?? null;
   return {
     deliveryId,
     cluster,
     walletLabel: safeLabel,
     event,
-    summary: summarizeEvent(event),
+    summary: summarizeEvent(event, estimatedUsd),
     explorerUrl: solscanTxUrl(event.signature, cluster),
+    estimatedUsd,
+    source: options.source ?? "websocket",
   };
 }
 
@@ -87,7 +137,7 @@ function eventColor(event: OnChainEvent): number {
     case "spl_transfer":
       return event.direction === "in" ? 0x14f195 : 0xf59e0b;
     case "dex_swap":
-      return 0x14f195;
+      return 0x9945ff;
     case "program_interaction":
       return 0x6366f1;
     default:
@@ -95,31 +145,47 @@ function eventColor(event: OnChainEvent): number {
   }
 }
 
+function sourceBadge(source: AlertEnvelope["source"]): string {
+  if (source === "backfill") return "[BACKFILL] ";
+  if (source === "test") return "[TEST] ";
+  return "";
+}
+
 export function formatTelegramHtml(envelope: AlertEnvelope): string {
-  const { event, walletLabel, summary, explorerUrl } = envelope;
+  const { event, walletLabel, summary, explorerUrl, cluster, source } = envelope;
   const escapedWallet = escapeHtml(sanitizeControlChars(shortAddress(event.wallet)));
+  const walletLink = `<a href="${escapeHtml(solscanAccountUrl(event.wallet, cluster))}"><code>${escapedWallet}</code></a>`;
   const safeLabel = walletLabel ? sanitizeControlChars(walletLabel, 80) : null;
-  const walletHeading = safeLabel
-    ? `${escapeHtml(safeLabel)} (<code>${escapedWallet}</code>)`
-    : `<code>${escapedWallet}</code>`;
+  const walletHeading = safeLabel ? `${escapeHtml(safeLabel)} (${walletLink})` : walletLink;
+  const clusterTag = cluster === "mainnet-beta" ? "" : ` [${escapeHtml(cluster.toUpperCase())}]`;
+  const prefix = sourceBadge(source);
 
   const lines = [
-    `<b>${escapeHtml(sanitizeControlChars(eventTitle(event)))}</b>`,
+    `<b>${escapeHtml(prefix + sanitizeControlChars(eventTitle(event)))}${clusterTag}</b>`,
     `<b>Wallet:</b> ${walletHeading}`,
     `<b>Action:</b> ${escapeHtml(sanitizeControlChars(summary, 300))}`,
   ];
 
   if (event.kind === "sol_transfer" || event.kind === "spl_transfer") {
     if (event.counterparty) {
+      const escapedCounterparty = escapeHtml(
+        sanitizeControlChars(shortAddress(event.counterparty)),
+      );
       lines.push(
-        `<b>Counterparty:</b> <code>${escapeHtml(sanitizeControlChars(shortAddress(event.counterparty)))}</code>`,
+        `<b>Counterparty:</b> <a href="${escapeHtml(solscanAccountUrl(event.counterparty, cluster))}"><code>${escapedCounterparty}</code></a>`,
       );
     }
   }
 
   lines.push(
-    `<b>Fee:</b> ${formatLamportsAsSol(event.feeLamports, 6)} SOL | <b>Slot:</b> ${event.slot.toString()}`,
+    `<b>Fee:</b> ${formatDisplaySol(event.feeLamports, 6)} SOL | <b>Slot:</b> ${formatGroupedInteger(event.slot.toString())}`,
   );
+
+  const utcTime = formatUtcTimestamp(event.timestampSec);
+  if (utcTime) {
+    lines.push(`<b>Time:</b> ${escapeHtml(utcTime)}`);
+  }
+
   lines.push(`<a href="${escapeHtml(explorerUrl)}">Open on Solscan</a>`);
   return lines.join("\n");
 }
@@ -147,7 +213,7 @@ export type DiscordWebhookPayload = {
 };
 
 export function formatDiscordEmbed(envelope: AlertEnvelope): DiscordWebhookPayload {
-  const { event, walletLabel, summary, explorerUrl, cluster } = envelope;
+  const { event, walletLabel, summary, explorerUrl, cluster, estimatedUsd, source } = envelope;
   const safeWallet = escapeDiscordMarkdown(sanitizeControlChars(shortAddress(event.wallet)));
   const safeLabel = walletLabel
     ? escapeDiscordMarkdown(sanitizeControlChars(walletLabel, 80))
@@ -170,10 +236,18 @@ export function formatDiscordEmbed(envelope: AlertEnvelope): DiscordWebhookPaylo
     },
     {
       name: "Fee",
-      value: `${formatLamportsAsSol(event.feeLamports, 6)} SOL`,
+      value: `${formatDisplaySol(event.feeLamports, 6)} SOL`,
       inline: true,
     },
   ];
+
+  if (estimatedUsd !== null && estimatedUsd !== undefined && Number.isFinite(estimatedUsd)) {
+    fields.push({
+      name: "Est. Value",
+      value: formatUsdValue(estimatedUsd),
+      inline: true,
+    });
+  }
 
   if ((event.kind === "sol_transfer" || event.kind === "spl_transfer") && event.counterparty) {
     const safeCounterparty = escapeDiscordMarkdown(
@@ -186,13 +260,17 @@ export function formatDiscordEmbed(envelope: AlertEnvelope): DiscordWebhookPaylo
     });
   }
 
+  const footerSuffix = source === "backfill" ? " • BACKFILL" : source === "test" ? " • TEST" : "";
+  const prefix = sourceBadge(source);
   const embedBase = {
-    title: escapeDiscordMarkdown(sanitizeControlChars(eventTitle(event), 120)),
+    title: escapeDiscordMarkdown(sanitizeControlChars(prefix + eventTitle(event), 120)),
     description: escapeDiscordMarkdown(sanitizeControlChars(summary, 300)),
     url: explorerUrl,
     color: eventColor(event),
     fields,
-    footer: { text: `solwatch • slot ${event.slot.toString()}` },
+    footer: {
+      text: `solwatch • slot ${formatGroupedInteger(event.slot.toString())}${footerSuffix}`,
+    },
   };
 
   const safeTimestamp =
@@ -224,6 +302,7 @@ export function formatWebhookPayload(envelope: AlertEnvelope) {
           direction: event.direction,
           counterparty: event.counterparty,
           lamports: event.lamports.toString(),
+          uiAmount: formatUnits(event.lamports, 9, 9),
           feeLamports: event.feeLamports.toString(),
           success: event.success,
         };
@@ -239,6 +318,7 @@ export function formatWebhookPayload(envelope: AlertEnvelope) {
           symbol: event.symbol,
           rawAmount: event.rawAmount.toString(),
           decimals: event.decimals,
+          uiAmount: formatUnits(event.rawAmount, event.decimals, event.decimals),
           counterparty: event.counterparty,
           feeLamports: event.feeLamports.toString(),
           success: event.success,
@@ -257,12 +337,22 @@ export function formatWebhookPayload(envelope: AlertEnvelope) {
             symbol: event.tokenIn.symbol,
             rawAmount: event.tokenIn.rawAmount.toString(),
             decimals: event.tokenIn.decimals,
+            uiAmount: formatUnits(
+              event.tokenIn.rawAmount,
+              event.tokenIn.decimals,
+              event.tokenIn.decimals,
+            ),
           },
           tokenOut: {
             mint: event.tokenOut.mint,
             symbol: event.tokenOut.symbol,
             rawAmount: event.tokenOut.rawAmount.toString(),
             decimals: event.tokenOut.decimals,
+            uiAmount: formatUnits(
+              event.tokenOut.rawAmount,
+              event.tokenOut.decimals,
+              event.tokenOut.decimals,
+            ),
           },
           feeLamports: event.feeLamports.toString(),
           success: event.success,
@@ -285,10 +375,13 @@ export function formatWebhookPayload(envelope: AlertEnvelope) {
   })();
 
   return {
+    schemaVersion: "1.1",
     deliveryId: envelope.deliveryId,
+    source: envelope.source ?? "websocket",
     cluster: envelope.cluster,
     walletLabel: envelope.walletLabel,
     summary: envelope.summary,
+    estimatedUsd: envelope.estimatedUsd ?? null,
     explorerUrl: envelope.explorerUrl,
     event: serializedEvent,
   };
@@ -300,8 +393,9 @@ export function formatConsoleLine(envelope: AlertEnvelope): string {
     : sanitizeControlChars(shortAddress(envelope.event.wallet));
   const safeSummary = sanitizeControlChars(envelope.summary, 300);
   const statusTag = envelope.event.success ? "OK" : "FAIL";
+  const prefix = sourceBadge(envelope.source);
   return [
-    `[${statusTag}] [${safeLabel || shortAddress(envelope.event.wallet)}] ${safeSummary}`,
+    `[${statusTag}] ${prefix}[${safeLabel || shortAddress(envelope.event.wallet)}] ${safeSummary}`,
     `  tx: ${envelope.event.signature} | slot: ${envelope.event.slot.toString()}`,
     `  url: ${envelope.explorerUrl}\n`,
   ].join("\n");
