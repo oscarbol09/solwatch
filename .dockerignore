@@ -12,3 +12,11 @@ data/
 *.db-shm
 tests/
 *.log
+README.md
+LICENSE
+CHANGELOG.md
+biome.json
+vitest.config.ts
+.gitignore
+Dockerfile
+docker-compose.yml
