@@ -618,4 +618,110 @@ describe("HTTP API server (Hono)", () => {
 
     store.close();
   });
+
+  it("supports X-Request-Id propagation, /readyz readiness probes, and Prometheus /metrics", async () => {
+    let isShuttingDown = false;
+    let watcherRunning = true;
+
+    const store = new SqliteStore(":memory:");
+    const service = new MonitorService({
+      store,
+      rpcPort: {
+        getTransaction: async () => null,
+        getSignaturesForAddress: async () => [],
+      },
+      dispatcher: new AlertDispatcher({
+        notifiers: [],
+        store,
+        cluster: "mainnet-beta",
+        logger: createLogger("silent"),
+      }),
+      logger: createLogger("silent"),
+    });
+
+    const app = createApiApp({
+      service,
+      store,
+      cluster: "mainnet-beta",
+      apiToken: "super-secret-probe-token",
+      getWatcherStatus: () => ({
+        running: watcherRunning,
+        connectedCount: watcherRunning ? 1 : 0,
+        watchedCount: store.listWallets(true).length,
+        reconnectsTotal: 0,
+      }),
+      channels: ["test"],
+      logger: createLogger("silent"),
+      isShuttingDown: () => isShuttingDown,
+    });
+
+    // 1. X-Request-Id header checks
+    const defaultRes = await app.request("/healthz");
+    expect(defaultRes.headers.get("x-request-id")).toBeDefined();
+    expect(defaultRes.headers.get("x-request-id")?.length).toBeGreaterThan(10);
+
+    const customRes = await app.request("/healthz", {
+      headers: { "x-request-id": "custom-trace-id-999" },
+    });
+    expect(customRes.headers.get("x-request-id")).toBe("custom-trace-id-999");
+
+    // 2. /readyz probe checks
+    const readyRes = await app.request("/readyz");
+    expect(readyRes.status).toBe(200);
+    const readyJson = (await readyRes.json()) as { status: string; checks: { database: string } };
+    expect(readyJson.status).toBe("ready");
+    expect(readyJson.checks.database).toBe("ok");
+
+    // Watcher disconnected with active wallets
+    store.createWallet(
+      parseWalletAddress("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"),
+      "Active Wallet",
+    );
+    watcherRunning = false;
+    const watcherErrRes = await app.request("/readyz");
+    expect(watcherErrRes.status).toBe(503);
+    const watcherErrJson = (await watcherErrRes.json()) as {
+      status: string;
+      reason: string;
+      error: string;
+    };
+    expect(watcherErrJson.status).toBe("not_ready");
+    expect(watcherErrJson.reason).toBe("watcher_disconnected");
+
+    // Reset watcher back to running
+    watcherRunning = true;
+
+    // Shutting down state check
+    isShuttingDown = true;
+    const shutdownRes = await app.request("/readyz");
+    expect(shutdownRes.status).toBe(503);
+    const shutdownJson = (await shutdownRes.json()) as { status: string; reason: string };
+    expect(shutdownJson.status).toBe("not_ready");
+    expect(shutdownJson.reason).toBe("shutting_down");
+    isShuttingDown = false;
+
+    // 3. /metrics checks
+    // Unauth check
+    const unauthMetrics = await app.request("/metrics");
+    expect(unauthMetrics.status).toBe(401);
+
+    // Auth check
+    const authMetrics = await app.request("/metrics", {
+      headers: { Authorization: "Bearer super-secret-probe-token" },
+    });
+    expect(authMetrics.status).toBe(200);
+    expect(authMetrics.headers.get("content-type")).toContain("text/plain");
+    const metricsBody = await authMetrics.text();
+    expect(metricsBody).toContain("# HELP solwatch_http_requests_total");
+    expect(metricsBody).toContain("solwatch_watched_wallets_total 1");
+    expect(metricsBody).toContain("solwatch_uptime_seconds");
+
+    // Database unresponsive check
+    store.close();
+    const dbErrRes = await app.request("/readyz");
+    expect(dbErrRes.status).toBe(503);
+    const dbErrJson = (await dbErrRes.json()) as { status: string; reason: string };
+    expect(dbErrJson.status).toBe("not_ready");
+    expect(dbErrJson.reason).toBe("database_unresponsive");
+  });
 });

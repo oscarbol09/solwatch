@@ -209,6 +209,7 @@ async function main(): Promise<void> {
       channels: dispatcher.getChannels(),
       logger,
       shutdownSignal: shutdownController.signal,
+      isShuttingDown: () => shuttingDown,
     });
 
     server = serve(

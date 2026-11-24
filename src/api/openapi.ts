@@ -85,6 +85,27 @@ export function buildOpenApiSpec(options: OpenApiBuildOptions): Record<string, u
           responses: { "200": { description: "Service alive" } },
         },
       },
+      "/readyz": {
+        get: {
+          summary: "Readiness probe verifying SQLite WAL and watcher connectivity",
+          responses: {
+            "200": { description: "Service ready to process transactions" },
+            "503": { description: "Service not ready" },
+          },
+        },
+      },
+      "/metrics": {
+        get: {
+          summary: "Prometheus text format metrics (RED method, queue depths, delivery counts)",
+          security: bearerSecurity,
+          responses: {
+            "200": {
+              description: "Prometheus metrics in text/plain 0.0.4 format",
+              content: { "text/plain": { schema: { type: "string" } } },
+            },
+          },
+        },
+      },
       "/api/status": {
         get: {
           summary: "Operational cluster, channel, and pipeline metrics",

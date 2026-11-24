@@ -14,6 +14,7 @@ import {
   type WalletAddress,
 } from "../domain/types.js";
 import type { AppLogger } from "../logger.js";
+import { MetricsCollector } from "../observability/metrics.js";
 import { sanitizeControlChars } from "../security/sanitize.js";
 import type { MonitorService } from "../service/monitorService.js";
 import { parseHeliusWebhookBatch } from "../solana/heliusAdapter.js";
@@ -45,6 +46,8 @@ export type ApiServerOptions = {
   readonly logger: AppLogger;
   readonly startedAtMs?: number | undefined;
   readonly shutdownSignal?: AbortSignal | undefined;
+  readonly isShuttingDown?: () => boolean;
+  readonly metricsCollector?: MetricsCollector;
 };
 
 const BASE_SECURITY_HEADERS: Readonly<Record<string, string>> = {
@@ -215,28 +218,41 @@ export function createApiApp(options: ApiServerOptions): Hono {
   const rateLimitWindowMs = options.rateLimitWindowMs ?? 60_000;
   const dashboardEnabled = options.dashboardEnabled ?? true;
   const authRequired = options.apiToken !== undefined;
+  const metricsCollector = options.metricsCollector ?? new MetricsCollector();
 
   const corsHeaders: Record<string, string> = options.corsOrigin
     ? {
         "Access-Control-Allow-Origin": options.corsOrigin,
         Vary: "Origin",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Request-Id",
         "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
       }
     : {};
 
   app.use("*", async (c, next) => {
+    const incomingReqId = c.req.header("x-request-id");
+    const requestId =
+      incomingReqId && /^[a-zA-Z0-9_-]{1,64}$/.test(incomingReqId) ? incomingReqId : randomUUID();
+
+    const startHr = process.hrtime.bigint();
+
     if (options.corsOrigin && c.req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
         headers: {
           ...JSON_SECURITY_HEADERS,
           ...corsHeaders,
+          "X-Request-Id": requestId,
         },
       });
     }
 
     await next();
+
+    const durationSec = Number(process.hrtime.bigint() - startHr) / 1e9;
+    metricsCollector.recordHttpRequest(c.req.method, c.req.path, c.res.status, durationSec);
+
+    c.res.headers.set("X-Request-Id", requestId);
     for (const [header, value] of Object.entries(BASE_SECURITY_HEADERS)) {
       c.res.headers.set(header, value);
     }
@@ -318,11 +334,87 @@ export function createApiApp(options: ApiServerOptions): Hono {
   });
 
   app.use("/healthz", rateLimiter);
+  app.use("/readyz", rateLimiter);
+  app.use("/metrics", rateLimiter);
   app.use("/api/*", rateLimiter);
   app.use("/webhooks/*", rateLimiter);
 
   app.get("/healthz", (c) => {
     return c.json({ status: "ok" });
+  });
+
+  app.get("/readyz", (c) => {
+    if (options.isShuttingDown?.()) {
+      return jsonErrorResponse(
+        503,
+        {
+          status: "not_ready",
+          reason: "shutting_down",
+          timestamp: new Date().toISOString(),
+        },
+        corsHeaders,
+      );
+    }
+
+    const dbAlive = options.store.ping();
+    if (!dbAlive) {
+      return jsonErrorResponse(
+        503,
+        {
+          status: "not_ready",
+          reason: "database_unresponsive",
+          timestamp: new Date().toISOString(),
+        },
+        corsHeaders,
+      );
+    }
+
+    const watchedCount = options.store.countWallets();
+    const watcherStatus = options.getWatcherStatus();
+    const connectedCount = watcherStatus.connectedCount ?? (watcherStatus.running ? 1 : 0);
+    if (watchedCount > 0 && (connectedCount === 0 || !watcherStatus.running)) {
+      return jsonErrorResponse(
+        503,
+        {
+          status: "not_ready",
+          reason: "watcher_disconnected",
+          error: "No active WebSocket subscriptions connected for watched wallets",
+          timestamp: new Date().toISOString(),
+        },
+        corsHeaders,
+      );
+    }
+
+    return c.json({
+      status: "ready",
+      timestamp: new Date().toISOString(),
+      checks: {
+        database: "ok",
+        watcher: watcherStatus.running ? "running" : "idle",
+        watchedWallets: watchedCount,
+        connectedSubscriptions: connectedCount,
+      },
+    });
+  });
+
+  app.get("/metrics", (c) => {
+    if (options.apiToken !== undefined) {
+      const authHeader = c.req.header("authorization") ?? "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+      if (!token || !timingSafeMatch(token, options.apiToken)) {
+        throw new AuthError("Invalid or missing Bearer token");
+      }
+    }
+
+    const text = metricsCollector.renderPrometheusText({
+      serviceMetrics: options.service.getMetrics(),
+      watchedWallets: options.store.countWallets(),
+      uptimeSeconds: Math.floor((Date.now() - startedAtMs) / 1_000),
+    });
+
+    c.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    c.header("Cache-Control", "no-store");
+    return c.text(text);
   });
 
   if (dashboardEnabled) {
