@@ -8,17 +8,45 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
 
 jobs:
-  verify:
+  security-audit:
+    name: Security & Secret Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secret leaks
+        uses: gitleaks/gitleaks-action@e816a3c4842d7be81f692015fa6e5eb981248fb2 # v2.3.8
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js 24
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "24.18.0"
+
+      - name: Production dependency vulnerability audit
+        run: npm audit --omit=dev --audit-level=high
+
+  verify:
+    name: Lint, Typecheck & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: "24.18.0"
           cache: "npm"
@@ -41,12 +69,22 @@ jobs:
       - name: Smoke test compiled demo
         run: node dist/demo.js
 
+      - name: Verify online SQLite backup utility
+        run: |
+          node dist/scripts/backup.js ./ci-backup.db
+          rm -f ./ci-backup.db
+
   docker:
+    name: Container Build & Vulnerability Scan
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [security-audit, verify]
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
       - name: Build Docker image
         run: docker build -t solwatch:ci .
@@ -58,3 +96,13 @@ jobs:
 
       - name: Smoke test compiled demo inside container
         run: docker run --rm solwatch:ci node dist/demo.js
+
+      - name: Run Trivy container security scan
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # 0.29.0
+        with:
+          image-ref: solwatch:ci
+          format: "table"
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"
