@@ -1,23 +1,82 @@
 import { ASSOCIATED_TOKEN_PROGRAM, classifyParsedTransaction } from "../domain/classifier.js";
 import { LimitExceededError } from "../domain/errors.js";
 import { type CooldownStore, evaluateAlertRules } from "../domain/rules.js";
+import { LAMPORTS_PER_SOL, WSOL_MINT } from "../domain/tokens.js";
 import {
   type AlertRule,
   type EventType,
+  type MintAddress,
   type OnChainEvent,
   parseRuleId,
+  parseTxSignature,
+  parseWalletAddress,
   type RuleId,
   type TxSignature,
   type WalletAddress,
   type WatchedWallet,
 } from "../domain/types.js";
 import type { AppLogger } from "../logger.js";
-import type { AlertDispatcher } from "../notifiers/dispatcher.js";
-import type { DeliveryResult } from "../notifiers/types.js";
+import type { AlertDispatcher, TrackedDispatchResult } from "../notifiers/dispatcher.js";
+import { solscanTxUrl, summarizeEvent } from "../notifiers/format.js";
+import type { AlertEnvelope, DeliveryResult } from "../notifiers/types.js";
 import { sanitizeControlChars } from "../security/sanitize.js";
 import type { SolanaRpcPort } from "../solana/rpcClient.js";
+import type { TokenEnricherPort } from "../solana/tokenEnricher.js";
 import type { SignatureEventMeta } from "../solana/watcher.js";
 import type { SqliteStore } from "../store/sqliteStore.js";
+
+const TEST_SIGNATURE = parseTxSignature(
+  "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW",
+);
+const DEFAULT_TEST_WALLET = parseWalletAddress("So11111111111111111111111111111111111111112");
+const MAX_STREAM_BUFFER = 50;
+const MAX_STREAM_SUBSCRIBERS = 50;
+
+export type MonitorStreamEvent =
+  | {
+      readonly kind: "tx_dispatched";
+      readonly timestampIso: string;
+      readonly deliveryId: string;
+      readonly wallet: WalletAddress;
+      readonly walletLabel: string | null;
+      readonly signature: TxSignature;
+      readonly eventKind: EventType;
+      readonly summary: string;
+      readonly estimatedUsd: number | null;
+      readonly explorerUrl: string;
+      readonly mint?: MintAddress | undefined;
+      readonly results: readonly DeliveryResult[];
+      readonly source: NonNullable<AlertEnvelope["source"]>;
+    }
+  | {
+      readonly kind: "tx_filtered";
+      readonly timestampIso: string;
+      readonly wallet: WalletAddress;
+      readonly walletLabel: string | null;
+      readonly signature: TxSignature;
+      readonly eventKind: EventType;
+      readonly reason: string;
+      readonly summary: string;
+      readonly mint?: MintAddress | undefined;
+    }
+  | {
+      readonly kind: "tx_deduped";
+      readonly timestampIso: string;
+      readonly wallet: WalletAddress;
+      readonly signature: TxSignature;
+    }
+  | {
+      readonly kind: "wallet_updated";
+      readonly timestampIso: string;
+      readonly action: "added" | "updated" | "removed";
+      readonly wallet: WalletAddress;
+    }
+  | {
+      readonly kind: "rule_updated";
+      readonly timestampIso: string;
+      readonly action: "upserted" | "deleted";
+      readonly ruleId: RuleId;
+    };
 
 export interface WalletWatchControl {
   watchWallet(address: WalletAddress): Promise<void>;
@@ -47,6 +106,7 @@ export type ServiceMetrics = {
 
 export type DefaultRuleConfig = {
   readonly minSolLamports: bigint;
+  readonly defaultMinUsd?: number | null | undefined;
   readonly includeFailed: boolean;
   readonly cooldownSeconds: number;
 };
@@ -57,6 +117,7 @@ export type MonitorServiceOptions = {
   readonly dispatcher: AlertDispatcher;
   readonly logger: AppLogger;
   readonly watchControl?: WalletWatchControl | undefined;
+  readonly tokenEnricher?: TokenEnricherPort | undefined;
   readonly nowMs?: (() => number) | undefined;
   readonly maxWatchedWallets?: number | undefined;
   readonly maxDirectQueueSize?: number | undefined;
@@ -106,10 +167,14 @@ export class MonitorService {
   private readonly outboxIntervalMs: number;
   private readonly pendingRetryIntervalMs: number;
   private readonly maintenanceIntervalMs: number;
+  private readonly tokenEnricher: TokenEnricherPort | undefined;
   private watchControl: WalletWatchControl | undefined;
 
   private cachedCatalogVersion = -1;
   private cachedEnabledWallets = new Set<WalletAddress>();
+
+  private readonly recentStreamEvents: MonitorStreamEvent[] = [];
+  private readonly streamListeners = new Set<(event: MonitorStreamEvent) => void>();
 
   private readonly directQueue: QueuedDirectEvent[] = [];
   private readonly directInFlightWallets = new Map<WalletAddress, Promise<unknown>>();
@@ -144,6 +209,7 @@ export class MonitorService {
     this.outboxIntervalMs = options.outboxIntervalMs ?? 5_000;
     this.pendingRetryIntervalMs = options.pendingRetryIntervalMs ?? 2_000;
     this.maintenanceIntervalMs = options.maintenanceIntervalMs ?? 3_600_000;
+    this.tokenEnricher = options.tokenEnricher;
     this.watchControl = options.watchControl;
   }
 
@@ -151,10 +217,48 @@ export class MonitorService {
     this.watchControl = control;
   }
 
+  getRecentStreamEvents(): readonly MonitorStreamEvent[] {
+    return [...this.recentStreamEvents];
+  }
+
+  subscribeEvents(listener: (event: MonitorStreamEvent) => void): () => void {
+    if (this.streamListeners.size >= MAX_STREAM_SUBSCRIBERS) {
+      const oldest = this.streamListeners.values().next().value;
+      if (oldest) {
+        this.streamListeners.delete(oldest);
+      }
+    }
+    this.streamListeners.add(listener);
+    return () => {
+      this.streamListeners.delete(listener);
+    };
+  }
+
+  private emitStreamEvent(event: MonitorStreamEvent): void {
+    if (
+      event.kind === "tx_dispatched" ||
+      event.kind === "tx_filtered" ||
+      event.kind === "tx_deduped"
+    ) {
+      this.recentStreamEvents.unshift(event);
+      if (this.recentStreamEvents.length > MAX_STREAM_BUFFER) {
+        this.recentStreamEvents.length = MAX_STREAM_BUFFER;
+      }
+    }
+    for (const listener of this.streamListeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        this.logger.warn({ err }, "Live event subscriber threw an error");
+      }
+    }
+  }
+
   ensureDefaultGlobalRule(defaults: DefaultRuleConfig): void {
     const existing = this.store.listAllRules();
     const globalId = parseRuleId("global-default");
     if (existing.length > 0 && !this.store.isRuleManagedByEnv(globalId)) {
+      this.logger.info("Skipping env default rule sync; custom rules are active");
       return;
     }
 
@@ -162,6 +266,7 @@ export class MonitorService {
       id: globalId,
       walletAddress: null,
       minSolLamports: defaults.minSolLamports,
+      minUsd: defaults.defaultMinUsd ?? null,
       eventTypes: ["sol_transfer", "spl_transfer", "dex_swap", "program_interaction"],
       mintAllowlist: [],
       mintDenylist: [],
@@ -170,14 +275,127 @@ export class MonitorService {
       enabled: true,
     };
     this.store.upsertRule(defaultRule, { managedByEnv: true });
+    this.logger.info(
+      {
+        ruleId: globalId,
+        minSolLamports: defaults.minSolLamports.toString(),
+        minUsd: defaultRule.minUsd,
+      },
+      "Synced default global rule from environment",
+    );
   }
 
-  upsertRule(rule: AlertRule): void {
-    this.store.upsertRule(rule, { managedByEnv: false });
+  upsertRule(rule: AlertRule, options: { readonly managedByEnv?: boolean | undefined } = {}): void {
+    this.store.upsertRule(rule, { managedByEnv: options.managedByEnv ?? false });
+    this.emitStreamEvent({
+      kind: "rule_updated",
+      timestampIso: new Date(this.nowMs()).toISOString(),
+      action: "upserted",
+      ruleId: rule.id,
+    });
   }
 
   deleteRule(id: RuleId): boolean {
-    return this.store.deleteRule(id);
+    const deleted = this.store.deleteRule(id);
+    if (deleted) {
+      this.emitStreamEvent({
+        kind: "rule_updated",
+        timestampIso: new Date(this.nowMs()).toISOString(),
+        action: "deleted",
+        ruleId: id,
+      });
+    }
+    return deleted;
+  }
+
+  private resolveMutableGlobalRule(defaultMinSolLamports: bigint): AlertRule {
+    const globalId = parseRuleId("global-default");
+    return (
+      this.store.getRule(globalId) ??
+      this.store.listAllRules().find((r) => r.walletAddress === null) ?? {
+        id: globalId,
+        walletAddress: null,
+        minSolLamports: defaultMinSolLamports,
+        minUsd: null,
+        eventTypes: ["sol_transfer", "spl_transfer", "dex_swap", "program_interaction"] as const,
+        mintAllowlist: [] as const,
+        mintDenylist: [] as const,
+        includeFailed: false,
+        cooldownSeconds: 0,
+        enabled: true,
+      }
+    );
+  }
+
+  denylistMintGlobal(mint: MintAddress): AlertRule {
+    const target = this.resolveMutableGlobalRule(0n);
+    const nextDenylist = target.mintDenylist.includes(mint)
+      ? target.mintDenylist
+      : [...target.mintDenylist, mint];
+    const updated: AlertRule = {
+      ...target,
+      mintDenylist: nextDenylist,
+    };
+    this.upsertRule(updated, { managedByEnv: false });
+    return updated;
+  }
+
+  updateGlobalMinSol(minSolLamports: bigint): AlertRule {
+    const target = this.resolveMutableGlobalRule(minSolLamports);
+    const updated: AlertRule = {
+      ...target,
+      minSolLamports,
+    };
+    this.upsertRule(updated, { managedByEnv: false });
+    return updated;
+  }
+
+  async sendTestAlert(
+    walletAddress?: WalletAddress,
+    signal?: AbortSignal,
+  ): Promise<TrackedDispatchResult> {
+    const targetWallet =
+      (walletAddress ? this.store.getWallet(walletAddress) : null) ??
+      this.store.listWallets()[0] ??
+      null;
+    const address = walletAddress ?? targetWallet?.address ?? DEFAULT_TEST_WALLET;
+    const walletLabel = targetWallet?.label ?? "Solwatch Test";
+
+    const testEvent: OnChainEvent = {
+      kind: "sol_transfer",
+      signature: TEST_SIGNATURE,
+      slot: 315_000_000n,
+      timestampSec: Math.floor(this.nowMs() / 1_000),
+      wallet: address,
+      direction: "in",
+      counterparty: DEFAULT_TEST_WALLET,
+      lamports: LAMPORTS_PER_SOL + LAMPORTS_PER_SOL / 4n,
+      feeLamports: 5_000n,
+      success: true,
+    };
+
+    const enriched = await this.enrichSafe(testEvent, signal);
+    const tracked = await this.dispatcher.dispatchTracked(enriched.event, walletLabel, signal, {
+      estimatedUsd: enriched.estimatedUsd,
+      source: "test",
+    });
+
+    this.emitStreamEvent({
+      kind: "tx_dispatched",
+      timestampIso: new Date(this.nowMs()).toISOString(),
+      deliveryId: tracked.deliveryId,
+      wallet: address,
+      walletLabel,
+      signature: enriched.event.signature,
+      eventKind: enriched.event.kind,
+      summary: summarizeEvent(enriched.event, enriched.estimatedUsd),
+      estimatedUsd: enriched.estimatedUsd,
+      explorerUrl: solscanTxUrl(enriched.event.signature, "mainnet-beta"),
+      results: tracked.results,
+      source: "test",
+    });
+
+    return tracked;
   }
 
   getEnabledWalletSet(): ReadonlySet<WalletAddress> {
@@ -202,6 +420,12 @@ export class MonitorService {
     }
     const created = this.store.createWallet(address, normalizedLabel);
     await this.watchControl?.watchWallet(address);
+    this.emitStreamEvent({
+      kind: "wallet_updated",
+      timestampIso: new Date(this.nowMs()).toISOString(),
+      action: "added",
+      wallet: address,
+    });
     this.logger.info({ wallet: address, label: normalizedLabel }, "Wallet added to watchlist");
     return created;
   }
@@ -228,6 +452,12 @@ export class MonitorService {
         await this.watchControl?.unwatchWallet(address);
       }
     }
+    this.emitStreamEvent({
+      kind: "wallet_updated",
+      timestampIso: new Date(this.nowMs()).toISOString(),
+      action: "updated",
+      wallet: address,
+    });
     this.logger.info({ wallet: address, enabled: updated.enabled }, "Wallet updated");
     return updated;
   }
@@ -236,6 +466,12 @@ export class MonitorService {
     await this.watchControl?.unwatchWallet(address);
     const removed = this.store.removeWallet(address);
     if (removed) {
+      this.emitStreamEvent({
+        kind: "wallet_updated",
+        timestampIso: new Date(this.nowMs()).toISOString(),
+        action: "removed",
+        wallet: address,
+      });
       this.logger.info({ wallet: address }, "Wallet removed from watchlist");
     }
     return removed;
@@ -313,13 +549,14 @@ export class MonitorService {
       });
     }
 
-    return this.applyDedupeRulesAndDispatch(event, meta?.advanceRpcCursor ?? true, signal);
+    const source = meta && !meta.advanceRpcCursor ? "backfill" : "websocket";
+    return this.applyDedupeRulesAndDispatch(event, meta?.advanceRpcCursor ?? true, signal, source);
   }
 
   async processDirectEvent(event: OnChainEvent, signal?: AbortSignal): Promise<ProcessOutcome> {
     this.processedTotal += 1;
     // Direct webhook events can include SPL ATA transfers absent from getSignaturesForAddress(root).
-    return this.applyDedupeRulesAndDispatch(event, false, signal);
+    return this.applyDedupeRulesAndDispatch(event, false, signal, "webhook");
   }
 
   enqueueDirectEvents(
@@ -450,7 +687,7 @@ export class MonitorService {
         }
 
         const event = classifyParsedTransaction(rawTx, item.walletAddress);
-        await this.applyDedupeRulesAndDispatch(event, item.advanceRpcCursor, signal);
+        await this.applyDedupeRulesAndDispatch(event, item.advanceRpcCursor, signal, item.source);
         resolved += 1;
       }
     } finally {
@@ -580,10 +817,26 @@ export class MonitorService {
     }
   }
 
+  private async enrichSafe(
+    event: OnChainEvent,
+    signal?: AbortSignal,
+  ): Promise<{ readonly event: OnChainEvent; readonly estimatedUsd: number | null }> {
+    if (!this.tokenEnricher) {
+      return { event, estimatedUsd: null };
+    }
+    try {
+      return await this.tokenEnricher.enrichEvent(event, signal);
+    } catch (err) {
+      this.logger.debug({ err }, "Token enrichment failed; continuing with raw event");
+      return { event, estimatedUsd: null };
+    }
+  }
+
   private async applyDedupeRulesAndDispatch(
     event: OnChainEvent,
     advanceRpcCursor: boolean,
     signal?: AbortSignal,
+    source: NonNullable<AlertEnvelope["source"]> = "websocket",
   ): Promise<ProcessOutcome> {
     const claim = this.store.claimSignatureAndAdvanceCursor({
       wallet: event.wallet,
@@ -603,6 +856,12 @@ export class MonitorService {
     }
     if (claim.status === "deduped") {
       this.dedupedTotal += 1;
+      this.emitStreamEvent({
+        kind: "tx_deduped",
+        timestampIso: new Date(this.nowMs()).toISOString(),
+        wallet: event.wallet,
+        signature: event.signature,
+      });
       return { status: "deduped" };
     }
     if (!claim.walletEnabled) {
@@ -610,22 +869,54 @@ export class MonitorService {
       return { status: "filtered", reason: "wallet_paused" };
     }
 
-    const rules = this.store.listRulesForWallet(event.wallet);
+    const { event: enrichedEvent, estimatedUsd } = await this.enrichSafe(event, signal);
+    const rules = this.store.listRulesForWallet(enrichedEvent.wallet);
     const evaluationTimeMs = this.nowMs();
-    const verdict = evaluateAlertRules(event, rules, this.cooldownStore, evaluationTimeMs);
+    const verdict = evaluateAlertRules(
+      enrichedEvent,
+      rules,
+      this.cooldownStore,
+      evaluationTimeMs,
+      estimatedUsd,
+    );
+    const eventMint =
+      enrichedEvent.kind === "spl_transfer"
+        ? enrichedEvent.mint
+        : enrichedEvent.kind === "dex_swap"
+          ? enrichedEvent.tokenOut.mint !== WSOL_MINT
+            ? enrichedEvent.tokenOut.mint
+            : enrichedEvent.tokenIn.mint
+          : undefined;
+
     if (!verdict.matched) {
       this.filteredTotal += 1;
+      this.emitStreamEvent({
+        kind: "tx_filtered",
+        timestampIso: new Date(evaluationTimeMs).toISOString(),
+        wallet: enrichedEvent.wallet,
+        walletLabel: claim.walletLabel,
+        signature: enrichedEvent.signature,
+        eventKind: enrichedEvent.kind,
+        reason: verdict.reason,
+        summary: summarizeEvent(enrichedEvent, estimatedUsd),
+        ...(eventMint !== undefined ? { mint: eventMint } : {}),
+      });
       this.logger.debug(
-        { wallet: event.wallet, signature: event.signature, reason: verdict.reason },
+        {
+          wallet: enrichedEvent.wallet,
+          signature: enrichedEvent.signature,
+          reason: verdict.reason,
+        },
         "Transaction filtered by alert rules",
       );
       return { status: "filtered", reason: verdict.reason };
     }
 
     const { deliveryId, results } = await this.dispatcher.dispatchTracked(
-      event,
+      enrichedEvent,
       claim.walletLabel,
       signal,
+      { estimatedUsd, source },
     );
 
     const sentCount = results.filter((r) => r.status === "sent").length;
@@ -636,17 +927,38 @@ export class MonitorService {
 
     if (sentCount > 0) {
       this.dispatchedTotal += 1;
-      this.cooldownStore.record(event.wallet, event.kind, evaluationTimeMs, verdict.matchedRuleId);
+      this.cooldownStore.record(
+        enrichedEvent.wallet,
+        enrichedEvent.kind,
+        evaluationTimeMs,
+        verdict.matchedRuleId,
+      );
     }
+
+    this.emitStreamEvent({
+      kind: "tx_dispatched",
+      timestampIso: new Date(this.nowMs()).toISOString(),
+      deliveryId,
+      wallet: enrichedEvent.wallet,
+      walletLabel: claim.walletLabel,
+      signature: enrichedEvent.signature,
+      eventKind: enrichedEvent.kind,
+      summary: summarizeEvent(enrichedEvent, estimatedUsd),
+      estimatedUsd,
+      explorerUrl: solscanTxUrl(enrichedEvent.signature, "mainnet-beta"),
+      ...(eventMint !== undefined ? { mint: eventMint } : {}),
+      results,
+      source,
+    });
 
     if (failedResults.length > 0) {
       this.store.enqueueOutboxItems(
         failedResults.map((failed) => ({
           deliveryId,
-          walletAddress: event.wallet,
+          walletAddress: enrichedEvent.wallet,
           walletLabel: claim.walletLabel,
-          signature: event.signature,
-          event,
+          signature: enrichedEvent.signature,
+          event: enrichedEvent,
           channel: failed.channel,
           nextRetryAtMs: this.nowMs() + 15_000,
           lastError: failed.errorMessage ?? "Delivery failed",
