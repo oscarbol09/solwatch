@@ -21,6 +21,8 @@ function setupApiTestEnv(
     heliusSecret?: string;
     maxWatchedWallets?: number;
     rateLimitMax?: number;
+    dashboardEnabled?: boolean;
+    corsOrigin?: string;
   } = {},
 ) {
   const store = new SqliteStore(":memory:");
@@ -64,6 +66,8 @@ function setupApiTestEnv(
     apiToken: options.apiToken,
     heliusWebhookSecret: options.heliusSecret,
     rateLimitMax: options.rateLimitMax,
+    dashboardEnabled: options.dashboardEnabled,
+    corsOrigin: options.corsOrigin,
     rateLimitKeyGenerator: () => "test-client",
     getWatcherStatus: () => ({
       running: true,
@@ -320,5 +324,298 @@ describe("HTTP API server (Hono)", () => {
     const internalBody = (await internalErrRes.json()) as { error: string; message: string };
     expect(internalBody.error).toBe("INTERNAL_SERVER_ERROR");
     expect(internalBody.message).not.toContain("SQLite");
+  });
+
+  it("exposes rules/wallet PATCH control plane, paginated alerts, test alerts, SSE stream, OpenAPI docs, and dashboard", async () => {
+    const { app, store, delivered } = setupApiTestEnv({
+      apiToken: "secret-api-token",
+      corsOrigin: "https://console.example.com",
+    });
+    const authHeaders = {
+      Authorization: "Bearer secret-api-token",
+      "Content-Type": "application/json",
+    };
+
+    // Preflight CORS
+    const preflight = await app.request("/api/wallets", { method: "OPTIONS" });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe(
+      "https://console.example.com",
+    );
+
+    // Embedded dashboard HTML & docs with valid script syntax and nonce CSP
+    const dashRes = await app.request("/");
+    expect(dashRes.status).toBe(200);
+    expect(dashRes.headers.get("content-security-policy")).toContain("script-src 'nonce-");
+    const dashHtml = await dashRes.text();
+    const dashScript = dashHtml.match(/<script[^>]*>([\s\S]*?)<\/script>/)?.[1] ?? "";
+    expect(dashScript.length).toBeGreaterThan(100);
+    expect(() => new Function(dashScript)).not.toThrow();
+
+    const specRes = await app.request("/openapi.json");
+    expect(specRes.status).toBe(200);
+    const spec = (await specRes.json()) as { openapi: string; paths: Record<string, unknown> };
+    expect(spec.openapi).toBe("3.1.0");
+    expect(spec.paths["/api/rules"]).toBeDefined();
+
+    const docsRes = await app.request("/docs");
+    expect(docsRes.status).toBe(200);
+    const docsHtml = await docsRes.text();
+    const docsScript = docsHtml.match(/<script[^>]*>([\s\S]*?)<\/script>/)?.[1] ?? "";
+    expect(() => new Function(docsScript)).not.toThrow();
+
+    // Wallet GET/PATCH lifecycle
+    await app.request("/api/wallets", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ address: WATCHED_WALLET_A, label: "Vault" }),
+    });
+
+    const getWalletRes = await app.request(`/api/wallets/${WATCHED_WALLET_A}`, {
+      headers: authHeaders,
+    });
+    expect(getWalletRes.status).toBe(200);
+
+    const patchWalletRes = await app.request(`/api/wallets/${WATCHED_WALLET_A}`, {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({ label: "Main Vault", enabled: false }),
+    });
+    expect(patchWalletRes.status).toBe(200);
+    const patchedJson = (await patchWalletRes.json()) as {
+      wallet: { label: string | null; enabled: boolean };
+    };
+    expect(patchedJson.wallet.label).toBe("Main Vault");
+    expect(patchedJson.wallet.enabled).toBe(false);
+
+    // Clear label explicitly via null
+    const clearLabelRes = await app.request(`/api/wallets/${WATCHED_WALLET_A}`, {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({ label: null }),
+    });
+    expect(clearLabelRes.status).toBe(200);
+    expect(
+      ((await clearLabelRes.json()) as { wallet: { label: string | null } }).wallet.label,
+    ).toBeNull();
+
+    // Rule CRUD + denylist
+    const createRuleRes = await app.request("/api/rules", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        id: "vip-whale",
+        walletAddress: WATCHED_WALLET_A,
+        minSol: "2.5",
+        minUsd: 250,
+        eventTypes: ["sol_transfer", "dex_swap"],
+        cooldownSeconds: 30,
+      }),
+    });
+    expect(createRuleRes.status).toBe(201);
+
+    const patchRuleRes = await app.request("/api/rules/vip-whale", {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({ cooldownSeconds: 60, enabled: false }),
+    });
+    expect(patchRuleRes.status).toBe(200);
+
+    const listRulesRes = await app.request(`/api/rules?wallet=${WATCHED_WALLET_A}`, {
+      headers: authHeaders,
+    });
+    expect(listRulesRes.status).toBe(200);
+    const listRulesJson = (await listRulesRes.json()) as { rules: Array<{ id: string }> };
+    expect(listRulesJson.rules.some((r) => r.id === "vip-whale")).toBe(true);
+
+    const denylistRes = await app.request("/api/rules/denylist", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ mint: "SpamDust11111111111111111111111111111111111" }),
+    });
+    expect(denylistRes.status).toBe(200);
+
+    const delRuleRes = await app.request("/api/rules/vip-whale", {
+      method: "DELETE",
+      headers: authHeaders,
+    });
+    expect(delRuleRes.status).toBe(200);
+
+    // Test alert dispatch + alerts cursor filter
+    const testAlertRes = await app.request("/api/alerts/test", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ walletAddress: WATCHED_WALLET_A }),
+    });
+    expect(testAlertRes.status).toBe(200);
+    expect(delivered).toHaveLength(1);
+
+    const alertsPage = await app.request("/api/alerts?limit=1&status=sent&channel=memory", {
+      headers: authHeaders,
+    });
+    expect(alertsPage.status).toBe(200);
+    const alertsPageJson = (await alertsPage.json()) as {
+      alerts: Array<{ id: number }>;
+      nextCursor: number | null;
+    };
+    expect(alertsPageJson.alerts).toHaveLength(1);
+    expect(alertsPageJson.nextCursor).toBe(alertsPageJson.alerts[0]?.id ?? null);
+
+    // SSE stream delivers initial snapshot and subsequent wallet mutation event
+    const sseController = new AbortController();
+    const sseRes = await app.request("/api/events/stream", {
+      headers: { Authorization: "Bearer secret-api-token" },
+      signal: sseController.signal,
+    });
+    expect(sseRes.status).toBe(200);
+    expect(sseRes.headers.get("content-type")).toContain("text/event-stream");
+    const reader = sseRes.body?.getReader();
+    if (!reader) throw new Error("Expected SSE body reader");
+    const decoder = new TextDecoder();
+    const snapChunk = await reader.read();
+    expect(decoder.decode(snapChunk.value)).toContain("event: snapshot");
+
+    await app.request(`/api/wallets/${WATCHED_WALLET_A}`, {
+      method: "PATCH",
+      headers: authHeaders,
+      body: JSON.stringify({ enabled: true }),
+    });
+    const activityChunk = await reader.read();
+    expect(decoder.decode(activityChunk.value)).toContain("wallet_updated");
+    sseController.abort();
+    await reader.cancel().catch(() => {});
+
+    // Put rule + partial error & validation branches across control-plane routes
+    const putRuleRes = await app.request("/api/rules/put-rule", {
+      method: "PUT",
+      headers: authHeaders,
+      body: JSON.stringify({ minSol: "1", cooldownSeconds: 10 }),
+    });
+    expect(putRuleRes.status).toBe(200);
+    expect(
+      (await app.request("/api/rules/put-rule", { method: "DELETE", headers: authHeaders })).status,
+    ).toBe(200);
+
+    expect(
+      (await app.request(`/api/wallets/${COUNTERPARTY_WALLET}`, { headers: authHeaders })).status,
+    ).toBe(404);
+    expect(
+      (
+        await app.request(`/api/wallets/${COUNTERPARTY_WALLET}`, {
+          method: "PATCH",
+          headers: authHeaders,
+          body: JSON.stringify({ enabled: false }),
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await app.request(`/api/wallets/${WATCHED_WALLET_A}`, {
+          method: "PATCH",
+          headers: { Authorization: "Bearer secret-api-token", "Content-Type": "text/plain" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(415);
+    expect(
+      (
+        await app.request(`/api/wallets/${WATCHED_WALLET_A}`, {
+          method: "PATCH",
+          headers: authHeaders,
+          body: "{}",
+        })
+      ).status,
+    ).toBe(400);
+
+    expect(
+      (
+        await app.request("/api/rules", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ walletAddress: COUNTERPARTY_WALLET, minSol: "1" }),
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await app.request("/api/rules/missing-rule", {
+          method: "PATCH",
+          headers: authHeaders,
+          body: JSON.stringify({ enabled: false }),
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await app.request("/api/rules/missing-rule", {
+          method: "DELETE",
+          headers: authHeaders,
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await app.request("/api/rules/denylist", {
+          method: "POST",
+          headers: { Authorization: "Bearer secret-api-token", "Content-Type": "text/plain" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(415);
+    expect(
+      (
+        await app.request("/api/rules/denylist", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ mint: "not-a-mint" }),
+        })
+      ).status,
+    ).toBe(400);
+
+    expect((await app.request("/api/alerts?beforeId=0", { headers: authHeaders })).status).toBe(
+      400,
+    );
+    expect((await app.request("/api/alerts?status=invalid", { headers: authHeaders })).status).toBe(
+      400,
+    );
+    expect(
+      (
+        await app.request(`/api/alerts?channel=${"x".repeat(40)}`, {
+          headers: authHeaders,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request("/api/alerts/test", {
+          method: "POST",
+          headers: { Authorization: "Bearer secret-api-token", "Content-Type": "text/plain" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(415);
+
+    // Dashboard disabled flag + unauthenticated dashboard rendering branch
+    const headless = setupApiTestEnv({ dashboardEnabled: false });
+    expect((await headless.app.request("/")).status).toBe(404);
+    expect((await headless.app.request("/docs")).status).toBe(404);
+    headless.store.close();
+
+    const openDash = setupApiTestEnv({});
+    expect((await openDash.app.request("/")).status).toBe(200);
+    expect((await openDash.app.request("/docs")).status).toBe(200);
+    expect((await openDash.app.request("/openapi.json")).status).toBe(200);
+    expect(
+      (
+        await openDash.app.request("/api/alerts/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(200);
+    openDash.store.close();
+
+    store.close();
   });
 });
