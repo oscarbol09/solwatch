@@ -464,6 +464,112 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
     });
     expect(replies.at(-1)).toContain("Stopped watching");
 
+    // Test unrecognized callback query falls through to empty answerCallbackQuery
+    await bot.handleUpdate({
+      update_id: 38,
+      callback_query: {
+        id: "cb_unrec",
+        from: { id: 1001, is_bot: false, first_name: "Tester" },
+        chat_instance: "inst",
+        data: "unknown_prefix:foo",
+        message: {
+          message_id: 1,
+          date: 1_760_000_000,
+          chat: { id: 1001, type: "private", first_name: "Tester" },
+          text: "list",
+        },
+      },
+    });
+    expect(callbackAnswers.at(-1)?.text).toBeUndefined();
+
+    // Test invalid wallet in callback queries
+    await bot.handleUpdate({
+      update_id: 39,
+      callback_query: {
+        id: "cb_inv_toggle",
+        from: { id: 1001, is_bot: false, first_name: "Tester" },
+        chat_instance: "inst",
+        data: "w:t:not_a_valid_solana_address",
+        message: {
+          message_id: 1,
+          date: 1_760_000_000,
+          chat: { id: 1001, type: "private", first_name: "Tester" },
+          text: "list",
+        },
+      },
+    });
+    expect(callbackAnswers.at(-1)?.text).toBe("Wallet not found.");
+
+    await bot.handleUpdate({
+      update_id: 40,
+      callback_query: {
+        id: "cb_inv_del",
+        from: { id: 1001, is_bot: false, first_name: "Tester" },
+        chat_instance: "inst",
+        data: "w:d:not_a_valid_solana_address",
+        message: {
+          message_id: 1,
+          date: 1_760_000_000,
+          chat: { id: 1001, type: "private", first_name: "Tester" },
+          text: "list",
+        },
+      },
+    });
+    expect(callbackAnswers.at(-1)?.text).toBe("Invalid wallet address.");
+
+    // Test /test alert with results containing an error message
+    const errorService = {
+      ...service,
+      sendTestAlert: async () => ({
+        deliveryId: "deliv_test_error_12345",
+        results: [
+          { channel: "webhook", status: "failed" as const, errorMessage: "HTTP 500 server error" },
+          { channel: "discord", status: "sent" as const, errorMessage: null },
+        ],
+      }),
+    };
+    const errorBot = createTelegramBot({
+      botToken: "BOT_TOKEN",
+      allowedChatIds: ["1001"],
+      cluster: "mainnet-beta",
+      store,
+      service: errorService as unknown as MonitorService,
+      botInfo: {
+        id: 999,
+        is_bot: true,
+        first_name: "solwatch",
+        username: "solwatch_test_bot",
+        can_join_groups: false,
+        can_read_all_group_messages: false,
+        supports_inline_queries: false,
+        can_connect_to_business: false,
+        has_main_web_app: false,
+        has_topics_enabled: false,
+        allows_users_to_create_topics: false,
+        supports_guest_queries: false,
+        needs_inline_query_location: false,
+        has_topic_sidebar: false,
+        can_manage_bots: false,
+        supports_join_request_queries: false,
+      },
+      getStatus: () => ({
+        running: true,
+        watchedCount: 1,
+        connectedCount: 1,
+        ataSubscriptionsCount: 0,
+        queueDepth: 0,
+        droppedQueueTotal: 0,
+        backfillTruncatedTotal: 0,
+        reconnectsTotal: 0,
+        lastEventAtMs: null,
+      }),
+      logger: createLogger("silent"),
+    });
+
+    await errorBot.handleUpdate(makeTextUpdate(41, 1001, "/test"));
+    expect(replies.at(-1)).toContain("webhook: failed (HTTP 500 server error)");
+    expect(replies.at(-1)).toContain("discord: sent");
+
     store.close();
   });
 });

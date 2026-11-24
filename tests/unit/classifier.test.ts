@@ -4,6 +4,7 @@ import {
   classifyParsedTransaction,
   JITO_TIP_ACCOUNTS,
   normalizeTokenScale18,
+  resolveProgramLabel,
   type SolanaTransactionInput,
 } from "../../src/domain/classifier.js";
 import { BONK_MINT, USDC_MINT, WSOL_MINT } from "../../src/domain/tokens.js";
@@ -520,6 +521,28 @@ describe("classifyParsedTransaction", () => {
     );
     expect(emptyPrograms.kind === "program_interaction" && emptyPrograms.summary).toBe(
       "Invoked Solana program",
+    );
+  });
+
+  it("resolves program labels across known programs, DEXs, NFT marketplaces, and fallback addresses", () => {
+    // Known programs
+    expect(resolveProgramLabel("11111111111111111111111111111111")).toBe("System");
+    expect(resolveProgramLabel("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")).toBe("SPL Token");
+
+    // DEX programs
+    expect(resolveProgramLabel("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4")).toBe("Jupiter");
+    expect(resolveProgramLabel("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")).toBe("Raydium");
+
+    // NFT Marketplaces
+    expect(resolveProgramLabel("TSWAPaqyCSx2KABk68Shruf4rp7CxcNi8hAsbdwmHbN")).toBe("Tensor");
+    expect(resolveProgramLabel("TCMPhJdwDryooaGtiocG1u3xcYbRpiJzb283XfCZsDp")).toBe("Tensor cNFT");
+    expect(resolveProgramLabel("M2mx93ekt1fmXSVkTrUL9xVFHkmME8HTUi5Cyc5aF7K")).toBe(
+      "Magic Eden v2",
+    );
+
+    // Unknown address fallback
+    expect(resolveProgramLabel("UnknownProgram111111111111111111111111111111")).toBe(
+      "Unkn...11111",
     );
   });
 });

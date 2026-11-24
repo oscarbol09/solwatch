@@ -672,4 +672,78 @@ describe("SolanaWatcher & KitLogsSubscriptionAdapter", () => {
       await wsMock.close();
     }
   });
+
+  it("survives onSignature errors and tracks staging buffer drop count under backfill congestion", async () => {
+    const subs = createFakeSubscriptionPort();
+    const store = new SqliteStore(":memory:");
+    store.createWallet(walletA, "Target A");
+    // Set a prior cursor to force backfillMissed to run
+    store.updateLastSignature(walletA, sig1, 101n);
+
+    let backfillGateResolve: () => void = () => {};
+    const backfillGate = new Promise<void>((resolve) => {
+      backfillGateResolve = resolve;
+    });
+
+    const rpcPort: SolanaRpcPort = {
+      async getTransaction() {
+        return null;
+      },
+      async getSignaturesForAddress() {
+        await backfillGate;
+        return [];
+      },
+    };
+
+    let signatureErrorLogged = false;
+    const testLogger = {
+      ...createLogger("silent"),
+      error: () => {
+        signatureErrorLogged = true;
+      },
+    };
+
+    const watcher = trackWatcher(
+      new SolanaWatcher({
+        subscriptionPort: subs.port,
+        rpcPort,
+        store,
+        commitment: "confirmed",
+        startupStaggerMs: 0,
+        logger: testLogger as unknown as ReturnType<typeof createLogger>,
+        maxStagingBufferSize: 1,
+        onSignature: async (_w, sig) => {
+          if (sig === sig2) {
+            throw new Error("Simulated onSignature handler crash");
+          }
+        },
+      }),
+    );
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const queues = subs.getQueues(walletA);
+    expect(queues).toHaveLength(1);
+
+    // Push 15 live notifications while backfill is waiting on the gate (> maxStagingBufferSize 10)
+    for (let i = 0; i < 15; i += 1) {
+      queues[0]?.push({
+        signature: i === 0 ? sig2 : sig3,
+        slot: BigInt(310_000_100 + i),
+        err: null,
+      });
+    }
+
+    // Allow microtasks to pump the stream into stagingBuffer while backfill is still blocked
+    await new Promise((r) => setTimeout(r, 25));
+
+    // Open gate and let backfill and staging drain
+    backfillGateResolve();
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(signatureErrorLogged).toBe(true);
+    expect(watcher.getStatus().droppedQueueTotal).toBeGreaterThan(0);
+    await watcher.stop();
+  });
 });
