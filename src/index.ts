@@ -1,6 +1,6 @@
 import { serve } from "@hono/node-server";
 import { createApiApp } from "./api/server.js";
-import { createTelegramBot } from "./bot/telegramBot.js";
+import { createTelegramBot, registerTelegramCommands } from "./bot/telegramBot.js";
 import { parseEnvConfig, redactUrlSecrets } from "./config.js";
 import { createLogger } from "./logger.js";
 import { ConsoleNotifier } from "./notifiers/consoleNotifier.js";
@@ -11,6 +11,7 @@ import type { Notifier } from "./notifiers/types.js";
 import { WebhookNotifier } from "./notifiers/webhookNotifier.js";
 import { MonitorService } from "./service/monitorService.js";
 import { SolanaRpcClient } from "./solana/rpcClient.js";
+import { JupiterTokenEnricher } from "./solana/tokenEnricher.js";
 import { KitLogsSubscriptionAdapter, SolanaWatcher } from "./solana/watcher.js";
 import { SqliteStore } from "./store/sqliteStore.js";
 
@@ -105,6 +106,7 @@ async function main(): Promise<void> {
         new TelegramNotifier({
           botToken: config.telegramBotToken,
           chatId: config.telegramAlertChatId,
+          messageThreadId: config.telegramAlertThreadId,
         }),
       );
     }
@@ -132,16 +134,22 @@ async function main(): Promise<void> {
       commitment: config.solanaCommitment,
     });
 
+    const tokenEnricher = config.priceEnrichmentEnabled
+      ? new JupiterTokenEnricher({ store, logger })
+      : undefined;
+
     service = new MonitorService({
       store,
       rpcPort: rpcClient,
       dispatcher,
       logger,
+      tokenEnricher,
       maxWatchedWallets: config.maxWatchedWallets,
     });
 
     service.ensureDefaultGlobalRule({
       minSolLamports: config.minSolAlertLamports,
+      defaultMinUsd: config.minUsdAlert,
       includeFailed: config.includeFailedTx,
       cooldownSeconds: config.defaultCooldownSeconds,
     });
@@ -172,12 +180,14 @@ async function main(): Promise<void> {
             service,
             store,
             cluster: config.solanaCluster,
+            channels: dispatcher.getChannels(),
             getStatus: () => activeWatcher.getStatus(),
             logger,
           })
         : null;
 
     if (bot) {
+      await registerTelegramCommands(bot, logger);
       void bot.start({ drop_pending_updates: true }).catch((err: unknown) => {
         logger.error({ err }, "Telegram bot polling stopped unexpectedly");
       });
@@ -192,6 +202,9 @@ async function main(): Promise<void> {
       trustProxy: config.trustProxy,
       rateLimitMax: config.apiRateLimitMax,
       rateLimitWindowMs: config.apiRateLimitWindowMs,
+      dashboardEnabled: config.dashboardEnabled,
+      priceEnrichmentEnabled: config.priceEnrichmentEnabled,
+      corsOrigin: config.corsOrigin,
       getWatcherStatus: () => activeWatcher.getStatus(),
       channels: dispatcher.getChannels(),
       logger,

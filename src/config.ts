@@ -102,6 +102,11 @@ const RawEnvSchema = z.object({
   MIN_SOL_ALERT: z.string().trim().default("0.1"),
   DEFAULT_COOLDOWN_SECONDS: z.coerce.number().int().min(0).max(86_400).default(0),
   INCLUDE_FAILED_TX: envBoolean(false),
+  DASHBOARD_ENABLED: envBoolean(true),
+  PRICE_ENRICHMENT_ENABLED: envBoolean(true),
+  MIN_USD_ALERT: optionalNonEmptyString(),
+  TELEGRAM_ALERT_THREAD_ID: optionalNonEmptyString(),
+  CORS_ORIGIN: optionalNonEmptyString(),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
 });
 
@@ -120,6 +125,11 @@ export type AppConfig = {
   readonly maxWatchedWallets: number;
   readonly apiRateLimitMax: number;
   readonly apiRateLimitWindowMs: number;
+  readonly dashboardEnabled: boolean;
+  readonly priceEnrichmentEnabled: boolean;
+  readonly minUsdAlert: number | undefined;
+  readonly telegramAlertThreadId: number | undefined;
+  readonly corsOrigin: string | undefined;
   readonly consoleAlertsEnabled: boolean;
   readonly telegramBotToken: string | undefined;
   readonly telegramAlertChatId: string | undefined;
@@ -266,6 +276,49 @@ export function parseEnvConfig(env: NodeJS.ProcessEnv = process.env): AppConfig 
     );
   }
 
+  let minUsdAlert: number | undefined;
+  if (data.MIN_USD_ALERT !== undefined) {
+    const parsedUsd = Number(data.MIN_USD_ALERT);
+    if (!Number.isFinite(parsedUsd) || parsedUsd < 0) {
+      throw new ValidationError("MIN_USD_ALERT must be a non-negative finite number", {
+        field: "MIN_USD_ALERT",
+      });
+    }
+    minUsdAlert = parsedUsd;
+  }
+
+  let telegramAlertThreadId: number | undefined;
+  if (data.TELEGRAM_ALERT_THREAD_ID !== undefined) {
+    if (!/^\d{1,12}$/.test(data.TELEGRAM_ALERT_THREAD_ID)) {
+      throw new ValidationError("TELEGRAM_ALERT_THREAD_ID must be a positive integer", {
+        field: "TELEGRAM_ALERT_THREAD_ID",
+      });
+    }
+    const parsedThread = Number(data.TELEGRAM_ALERT_THREAD_ID);
+    if (!Number.isSafeInteger(parsedThread) || parsedThread <= 0) {
+      throw new ValidationError("TELEGRAM_ALERT_THREAD_ID must be a positive integer", {
+        field: "TELEGRAM_ALERT_THREAD_ID",
+      });
+    }
+    telegramAlertThreadId = parsedThread;
+  }
+
+  let corsOrigin: string | undefined;
+  if (data.CORS_ORIGIN !== undefined) {
+    try {
+      corsOrigin = validateOutboundUrl(data.CORS_ORIGIN, {
+        allowedProtocols: ["https:", "http:"],
+        allowPrivateHosts: true,
+        allowCredentials: false,
+      }).origin;
+    } catch (err) {
+      throw new ValidationError(
+        err instanceof Error ? `Invalid CORS_ORIGIN: ${err.message}` : "Invalid CORS_ORIGIN",
+        { field: "CORS_ORIGIN" },
+      );
+    }
+  }
+
   return {
     solanaCluster: data.SOLANA_CLUSTER,
     solanaRpcUrl: data.SOLANA_RPC_URL,
@@ -281,6 +334,11 @@ export function parseEnvConfig(env: NodeJS.ProcessEnv = process.env): AppConfig 
     maxWatchedWallets: data.MAX_WATCHED_WALLETS,
     apiRateLimitMax: data.API_RATE_LIMIT_MAX,
     apiRateLimitWindowMs: data.API_RATE_LIMIT_WINDOW_MS,
+    dashboardEnabled: data.DASHBOARD_ENABLED,
+    priceEnrichmentEnabled: data.PRICE_ENRICHMENT_ENABLED,
+    minUsdAlert,
+    telegramAlertThreadId,
+    corsOrigin,
     consoleAlertsEnabled: data.CONSOLE_ALERTS_ENABLED,
     telegramBotToken: data.TELEGRAM_BOT_TOKEN,
     telegramAlertChatId: data.TELEGRAM_ALERT_CHAT_ID,

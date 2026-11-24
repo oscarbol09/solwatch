@@ -23,12 +23,12 @@ npm install
 npm run demo
 ```
 
-`npm run demo` runs an in-memory SQLite store and replays six realistic Solana transactions through the classifier, deduplication store, rule engine, and console formatter (including a duplicate signature and a denylisted Token-2022 spam mint).
+`npm run demo` runs an in-memory SQLite store and replays six realistic Solana transactions through the classifier, deduplication store, rule engine, and console formatter (including a duplicate signature and a denylisted Token-2022 spam mint). Pass `--ui` (`npm run demo -- --ui`) to launch the embedded web console (`GET /`) and OpenAPI explorer (`GET /docs`) on `http://127.0.0.1:3000`.
 
 To stream a live wallet from Devnet or Mainnet without running the HTTP server:
 
 ```bash
-SOLANA_CLUSTER=devnet SOLANA_RPC_URL=https://api.devnet.solana.com SOLANA_WS_URL=wss://api.devnet.solana.com npm run demo -- --live <SOLANA_WALLET_ADDRESS>
+npm run demo -- --live <SOLANA_WALLET_ADDRESS> --cluster devnet --min-sol 0
 ```
 
 ## Production Setup & Docker
@@ -77,27 +77,38 @@ flowchart LR
 
 Enable interactive commands by setting `TELEGRAM_BOT_TOKEN`, `TELEGRAM_INTERACTIVE_ENABLED=true`, restricting chats via `TELEGRAM_ALLOWED_CHAT_IDS`, and scoping `/watch` / `/unwatch` admin user IDs via `TELEGRAM_ALLOWED_USER_IDS`:
 
-| Command                    | Description                                                           |
-| :------------------------- | :-------------------------------------------------------------------- |
-| `/watch <address> [label]` | Register a wallet and start live WS monitoring immediately            |
-| `/unwatch <address>`       | Stop watching a wallet and remove it from active tracking             |
-| `/list`                    | Show all tracked wallets and status                                   |
-| `/recent`                  | Show the 5 latest alert delivery attempts                             |
-| `/status`                  | Report cluster, watcher status, reconnect count, and pipeline metrics |
+| Command                       | Description                                                          |
+| :---------------------------- | :------------------------------------------------------------------- |
+| `/watch <address> [label]`    | Register a wallet and start live WS monitoring immediately           |
+| `/unwatch <target>`           | Stop tracking a wallet by address, list index, or label              |
+| `/pause <target>` / `/resume` | Temporarily pause or resume wallet tracking                          |
+| `/list`                       | List tracked wallets with inline Pause / Remove / Solscan actions    |
+| `/rules`                      | Show active alert rules (`minSol`, `minUsd`, cooldown, denylists)    |
+| `/setmin <sol>`               | Update the global minimum SOL alert threshold                        |
+| `/denylist <mint>`            | Block a token mint globally                                          |
+| `/recent`                     | Show the 5 latest grouped alert delivery outcomes by channel         |
+| `/test`                       | Send a synthetic test alert to configured channels                   |
+| `/status`                     | Report cluster, active channels, reconnect count, and pipeline stats |
 
-## HTTP API & Signed Webhooks
+## HTTP API, Console & Signed Webhooks
 
 Bind beyond loopback requires `API_TOKEN` (`>= 32` chars). `POST /webhooks/helius` stays disabled (`503`) unless `HELIUS_WEBHOOK_SECRET` (`>= 32` chars) is set.
 
-| Endpoint                              | Auth                    | Purpose                                                 |
-| :------------------------------------ | :---------------------- | :------------------------------------------------------ |
-| `GET /healthz`                        | Public                  | Minimal container liveness probe (`{ "status": "ok" }`) |
-| `GET /api/status`                     | Bearer `API_TOKEN`      | Operational uptime, cluster, channels, and counters     |
-| `GET /api/wallets`                    | Bearer `API_TOKEN`      | List tracked wallets and cursors                        |
-| `POST /api/wallets`                   | Bearer `API_TOKEN`      | Add wallet `{ "address", "label?" }`                    |
-| `DELETE /api/wallets/:address`        | Bearer `API_TOKEN`      | Remove wallet and stop its watcher                      |
-| `GET /api/alerts?limit=25&wallet=...` | Bearer `API_TOKEN`      | Query delivery audit log                                |
-| `POST /webhooks/helius`               | `HELIUS_WEBHOOK_SECRET` | Ingest Helius Enhanced Webhook transaction arrays       |
+| Endpoint                                         | Auth                           | Purpose                                                 |
+| :----------------------------------------------- | :----------------------------- | :------------------------------------------------------ |
+| `GET /`                                          | Public HTML (API token prompt) | Embedded real-time console (SSE feed, wallets, rules)   |
+| `GET /openapi.json` & `GET /docs`                | Public                         | OpenAPI 3.1 schema and lightweight interactive API docs |
+| `GET /healthz`                                   | Public                         | Minimal container liveness probe (`{ "status": "ok" }`) |
+| `GET /api/status`                                | Bearer `API_TOKEN`             | Operational uptime, cluster, channels, and counters     |
+| `GET /api/wallets` & `GET /api/wallets/:addr`    | Bearer `API_TOKEN`             | List or inspect tracked wallets and scoped rules        |
+| `POST /api/wallets` & `PATCH /api/wallets/:addr` | Bearer `API_TOKEN`             | Add, rename, or pause/resume watched wallets            |
+| `DELETE /api/wallets/:address`                   | Bearer `API_TOKEN`             | Remove wallet and stop its watcher                      |
+| `GET / POST / PUT / PATCH / DELETE /api/rules`   | Bearer `API_TOKEN`             | Manage global and per-wallet filtering rules            |
+| `POST /api/rules/denylist`                       | Bearer `API_TOKEN`             | Append a token mint to the global denylist              |
+| `GET /api/alerts?limit=25&beforeId=...`          | Bearer `API_TOKEN`             | Query keyset-paginated delivery audit log               |
+| `POST /api/alerts/test`                          | Bearer `API_TOKEN`             | Dispatch a synthetic test alert across channels         |
+| `GET /api/events/stream`                         | Bearer `API_TOKEN`             | Live Server-Sent Events (SSE) activity stream           |
+| `POST /webhooks/helius`                          | `HELIUS_WEBHOOK_SECRET`        | Ingest Helius Enhanced Webhook transaction arrays       |
 
 When `WEBHOOK_SECRET` is set, outbound `WEBHOOK_URL` requests include `X-Solwatch-Delivery`, `X-Solwatch-Event`, `X-Solwatch-Timestamp` (Unix seconds), and `X-Solwatch-Signature` (`sha256=<hex>` computed over `${timestamp}.${deliveryId}.${eventKind}.${rawBody}`):
 

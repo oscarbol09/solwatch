@@ -328,8 +328,18 @@ describe("security primitives and hardening controls", () => {
     const localValidatorCfg = parseEnvConfig({
       SOLANA_RPC_URL: "http://127.0.0.1:8899",
       SOLANA_WS_URL: "ws://127.0.0.1:8900",
+      MIN_USD_ALERT: "25.5",
+      TELEGRAM_ALERT_THREAD_ID: "42",
+      CORS_ORIGIN: "https://console.example.com/subpath",
     });
     expect(localValidatorCfg.solanaRpcUrl).toBe("http://127.0.0.1:8899");
+    expect(localValidatorCfg.minUsdAlert).toBe(25.5);
+    expect(localValidatorCfg.telegramAlertThreadId).toBe(42);
+    expect(localValidatorCfg.corsOrigin).toBe("https://console.example.com");
+
+    expect(() => parseEnvConfig({ MIN_USD_ALERT: "-5" })).toThrow(ValidationError);
+    expect(() => parseEnvConfig({ TELEGRAM_ALERT_THREAD_ID: "abc" })).toThrow(ValidationError);
+    expect(() => parseEnvConfig({ CORS_ORIGIN: "ftp://bad.example.com" })).toThrow(ValidationError);
   });
 
   it("verifies timestamp-bound webhook HMAC signatures and rejects replay/tampering", () => {

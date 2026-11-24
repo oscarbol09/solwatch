@@ -2,7 +2,7 @@ import type { Update } from "grammy/types";
 import { HttpResponse, http } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { createTelegramBot } from "../../src/bot/telegramBot.js";
+import { createTelegramBot, registerTelegramCommands } from "../../src/bot/telegramBot.js";
 import { parseTxSignature, parseWalletAddress } from "../../src/domain/types.js";
 import { createLogger } from "../../src/logger.js";
 import { AlertDispatcher } from "../../src/notifiers/dispatcher.js";
@@ -11,6 +11,7 @@ import type { SolanaRpcPort } from "../../src/solana/rpcClient.js";
 import { SqliteStore } from "../../src/store/sqliteStore.js";
 import {
   COUNTERPARTY_WALLET,
+  CUSTOM_UNKNOWN_MINT,
   SIG_SOL_IN,
   WATCHED_WALLET_A,
 } from "../fixtures/solanaTransactions.js";
@@ -54,10 +55,15 @@ function makeTextUpdate(
 describe("Telegram interactive bot (grammY + MSW)", () => {
   it("handles commands, drops unauthorized/bot updates silently, and enforces group admin ACLs + bounds", async () => {
     const replies: string[] = [];
+    const replyMarkups: unknown[] = [];
+    const callbackAnswers: Array<{ text?: string }> = [];
+    let registeredCommandsCount = 0;
+
     server.use(
       http.post("https://api.telegram.org/botBOT_TOKEN/sendMessage", async ({ request }) => {
-        const body = (await request.json()) as { text?: string };
+        const body = (await request.json()) as { text?: string; reply_markup?: unknown };
         if (body.text) replies.push(body.text);
+        replyMarkups.push(body.reply_markup);
         return HttpResponse.json({
           ok: true,
           result: {
@@ -67,6 +73,19 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
             text: body.text ?? "",
           },
         });
+      }),
+      http.post(
+        "https://api.telegram.org/botBOT_TOKEN/answerCallbackQuery",
+        async ({ request }) => {
+          const body = (await request.json()) as { text?: string };
+          callbackAnswers.push(body);
+          return HttpResponse.json({ ok: true, result: true });
+        },
+      ),
+      http.post("https://api.telegram.org/botBOT_TOKEN/setMyCommands", async ({ request }) => {
+        const body = (await request.json()) as { commands?: unknown[] };
+        registeredCommandsCount = body.commands?.length ?? 0;
+        return HttpResponse.json({ ok: true, result: true });
       }),
     );
 
@@ -95,6 +114,7 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
     const bot = createTelegramBot({
       botToken: "BOT_TOKEN",
       allowedChatIds: ["1001"],
+      channels: ["telegram", "console"],
       service,
       store,
       cluster: "mainnet-beta",
@@ -153,6 +173,112 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
 
     await bot.handleUpdate(makeTextUpdate(4, 1001, "/list"));
     expect(replies.at(-1)).toContain("Treasury");
+    expect(JSON.stringify(replyMarkups.at(-1))).toContain(`w:t:${WATCHED_WALLET_A}`);
+
+    await bot.handleUpdate(makeTextUpdate(40, 1001, "/pause 1"));
+    expect(replies.at(-1)).toContain("Paused alerts");
+    expect(store.getWallet(parseWalletAddress(WATCHED_WALLET_A))?.enabled).toBe(false);
+
+    await bot.handleUpdate(makeTextUpdate(41, 1001, `/resume ${WATCHED_WALLET_A}`));
+    expect(replies.at(-1)).toContain("Resumed alerts");
+    expect(store.getWallet(parseWalletAddress(WATCHED_WALLET_A))?.enabled).toBe(true);
+
+    // Inline callback toggle and menu registration
+    await bot.handleUpdate({
+      update_id: 42,
+      callback_query: {
+        id: "cb_1",
+        from: { id: 1001, is_bot: false, first_name: "Tester" },
+        chat_instance: "inst",
+        data: `w:t:${WATCHED_WALLET_A}`,
+        message: {
+          message_id: 1,
+          date: 1_760_000_000,
+          chat: { id: 1001, type: "private", first_name: "Tester" },
+          text: "list",
+        },
+      },
+    });
+    expect(callbackAnswers.at(-1)?.text).toContain("Paused");
+
+    await bot.handleUpdate({
+      update_id: 420,
+      callback_query: {
+        id: "cb_2",
+        from: { id: 1001, is_bot: false, first_name: "Tester" },
+        chat_instance: "inst",
+        data: `w:t:${WATCHED_WALLET_A}`,
+        message: {
+          message_id: 1,
+          date: 1_760_000_000,
+          chat: { id: 1001, type: "private", first_name: "Tester" },
+          text: "list",
+        },
+      },
+    });
+    expect(callbackAnswers.at(-1)?.text).toContain("Resumed");
+
+    await bot.handleUpdate(makeTextUpdate(43, 1001, "/setmin 0.75"));
+    expect(replies.at(-1)).toContain("0.75 SOL");
+
+    await bot.handleUpdate(makeTextUpdate(44, 1001, `/denylist ${CUSTOM_UNKNOWN_MINT}`));
+    expect(replies.at(-1)).toContain("Blocked mint");
+
+    await bot.handleUpdate(makeTextUpdate(45, 1001, "/rules"));
+    expect(replies.at(-1)).toContain("Alert rules");
+
+    await bot.handleUpdate(makeTextUpdate(46, 1001, "/test"));
+    expect(replies.at(-1)).toContain("No outbound alert channels configured");
+
+    await bot.handleUpdate(makeTextUpdate(48, 1001, "/pause"));
+    expect(replies.at(-1)).toContain("Usage: /pause");
+    await bot.handleUpdate(makeTextUpdate(49, 1001, "/pause nonexistent"));
+    expect(replies.at(-1)).toContain("Wallet not found");
+    await bot.handleUpdate(makeTextUpdate(50, 1001, "/unwatch"));
+    expect(replies.at(-1)).toContain("Usage: /unwatch");
+    await bot.handleUpdate(makeTextUpdate(51, 1001, "/setmin"));
+    expect(replies.at(-1)).toContain("Usage: /setmin");
+    await bot.handleUpdate(makeTextUpdate(52, 1001, "/setmin bad-amt"));
+    expect(replies.at(-1)).toContain("Invalid SOL amount");
+    await bot.handleUpdate(makeTextUpdate(53, 1001, "/denylist bad-mint"));
+    expect(replies.at(-1)).toContain("Usage: /denylist");
+
+    await bot.handleUpdate({
+      update_id: 54,
+      callback_query: {
+        id: "cb_missing",
+        from: { id: 1001, is_bot: false, first_name: "Tester" },
+        chat_instance: "inst",
+        data: `w:t:${COUNTERPARTY_WALLET}`,
+        message: {
+          message_id: 1,
+          date: 1_760_000_000,
+          chat: { id: 1001, type: "private", first_name: "Tester" },
+          text: "list",
+        },
+      },
+    });
+    expect(callbackAnswers.at(-1)?.text).toBe("Wallet not found.");
+
+    await bot.handleUpdate({
+      update_id: 55,
+      callback_query: {
+        id: "cb_bad_del",
+        from: { id: 1001, is_bot: false, first_name: "Tester" },
+        chat_instance: "inst",
+        data: "w:d:invalid",
+        message: {
+          message_id: 1,
+          date: 1_760_000_000,
+          chat: { id: 1001, type: "private", first_name: "Tester" },
+          text: "list",
+        },
+      },
+    });
+    expect(callbackAnswers.at(-1)?.text).toBe("Invalid wallet address.");
+
+    await registerTelegramCommands(bot, createLogger("silent"));
+    expect(registeredCommandsCount).toBeGreaterThanOrEqual(12);
 
     await bot.handleUpdate(makeTextUpdate(5, 1001, "/recent"));
     expect(replies.at(-1)).toContain("No alert deliveries");
@@ -167,6 +293,18 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
     });
     await bot.handleUpdate(makeTextUpdate(24, 1001, "/recent"));
     expect(replies.at(-1)).toContain("+2.5 SOL");
+
+    store.recordDelivery({
+      walletAddress: parseWalletAddress(WATCHED_WALLET_A),
+      signature: parseTxSignature(SIG_SOL_IN),
+      eventKind: "sol_transfer",
+      summary: "+2.5 SOL (received)",
+      channel: "discord",
+      status: "failed",
+      errorMessage: "HTTP 500",
+    });
+    await bot.handleUpdate(makeTextUpdate(47, 1001, "/recent"));
+    expect(replies.at(-1)).toContain("FAIL discord | OK telegram");
 
     await bot.handleUpdate(makeTextUpdate(6, 1001, "/status"));
     expect(replies.at(-1)).toContain("Watched wallets: 1");
@@ -270,6 +408,61 @@ describe("Telegram interactive bot (grammY + MSW)", () => {
       }),
     );
     expect(replies.at(-1)).toBe("Permission denied.");
+
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(350, -100555, "/pause 1", { userId: 888, chatType: "supergroup" }),
+    );
+    expect(replies.at(-1)).toBe("Permission denied.");
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(351, -100555, "/setmin 1", { userId: 888, chatType: "supergroup" }),
+    );
+    expect(replies.at(-1)).toBe("Permission denied.");
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(352, -100555, `/denylist ${CUSTOM_UNKNOWN_MINT}`, {
+        userId: 888,
+        chatType: "supergroup",
+      }),
+    );
+    expect(replies.at(-1)).toBe("Permission denied.");
+    await groupBotWithAdmins.handleUpdate(
+      makeTextUpdate(353, -100555, "/test", { userId: 888, chatType: "supergroup" }),
+    );
+    expect(replies.at(-1)).toBe("Permission denied.");
+
+    // Non-admin inline callback delete in group must also be denied cleanly
+    await groupBotWithAdmins.handleUpdate({
+      update_id: 36,
+      callback_query: {
+        id: "cb_deny",
+        from: { id: 888, is_bot: false, first_name: "Member" },
+        chat_instance: "inst",
+        data: `w:d:${WATCHED_WALLET_A}`,
+        message: {
+          message_id: 2,
+          date: 1_760_000_000,
+          chat: { id: -100555, type: "supergroup", title: "Solwatch Group" },
+          text: "list",
+        },
+      },
+    });
+    expect(callbackAnswers.at(-1)?.text).toBe("Permission denied.");
+
+    await groupBotWithAdmins.handleUpdate({
+      update_id: 37,
+      callback_query: {
+        id: "cb_ok",
+        from: { id: 777, is_bot: false, first_name: "Admin" },
+        chat_instance: "inst",
+        data: `w:d:${WATCHED_WALLET_A}`,
+        message: {
+          message_id: 2,
+          date: 1_760_000_000,
+          chat: { id: -100555, type: "supergroup", title: "Solwatch Group" },
+          text: "list",
+        },
+      },
+    });
+    expect(replies.at(-1)).toContain("Stopped watching");
 
     store.close();
   });

@@ -1,11 +1,14 @@
+import { serve } from "@hono/node-server";
+import { createApiApp } from "./api/server.js";
 import { parseEnvConfig, redactUrlSecrets } from "./config.js";
 import type { SolanaTransactionInput } from "./domain/classifier.js";
-import { BONK_MINT, LAMPORTS_PER_SOL, USDC_MINT } from "./domain/tokens.js";
+import { BONK_MINT, parseSolToLamports, USDC_MINT, WSOL_MINT } from "./domain/tokens.js";
 import {
   parseMintAddress,
   parseRuleId,
   parseTxSignature,
   parseWalletAddress,
+  type SolanaCluster,
   type TxSignature,
 } from "./domain/types.js";
 import { createLogger } from "./logger.js";
@@ -18,7 +21,7 @@ import { SqliteStore } from "./store/sqliteStore.js";
 
 const TREASURY_WALLET = parseWalletAddress("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin");
 const COUNTERPARTY = "GsbwXfJraMomNxBcjYLcG3mxkBUiyWXAB32fGbSQQRJe";
-const SPAM_MINT = parseMintAddress("4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R");
+const SPAM_MINT = parseMintAddress("SpamDust11111111111111111111111111111111111");
 
 const SIG_SOL_IN = parseTxSignature(
   "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW",
@@ -183,7 +186,25 @@ function writeLine(line: string = ""): void {
   process.stdout.write(`${line}\n`);
 }
 
-async function runReplayDemo(): Promise<void> {
+function getFlagValue(args: readonly string[], name: string): string | undefined {
+  const idx = args.indexOf(name);
+  if (idx >= 0 && idx + 1 < args.length) {
+    return args[idx + 1];
+  }
+  return undefined;
+}
+
+function parseClusterArg(raw: string | undefined): SolanaCluster {
+  if (raw === "devnet" || raw === "testnet" || raw === "mainnet-beta") {
+    return raw;
+  }
+  return "mainnet-beta";
+}
+
+function createReplayService(options: {
+  readonly cluster: SolanaCluster;
+  readonly minSolLamports: bigint;
+}) {
   const store = new SqliteStore(":memory:");
   const logger = createLogger("silent");
   const fixtures = buildDemoFixtures();
@@ -200,7 +221,7 @@ async function runReplayDemo(): Promise<void> {
   const dispatcher = new AlertDispatcher({
     notifiers: [new ConsoleNotifier()],
     store,
-    cluster: "mainnet-beta",
+    cluster: options.cluster,
     logger,
   });
 
@@ -211,22 +232,51 @@ async function runReplayDemo(): Promise<void> {
     logger,
   });
 
-  await service.addWallet(TREASURY_WALLET, "Main Treasury");
-  store.upsertRule({
-    id: parseRuleId("demo-policy"),
-    walletAddress: null,
-    minSolLamports: LAMPORTS_PER_SOL / 10n,
-    eventTypes: ["sol_transfer", "spl_transfer", "dex_swap", "program_interaction"],
-    mintAllowlist: [],
-    mintDenylist: [SPAM_MINT],
-    includeFailed: false,
-    cooldownSeconds: 0,
-    enabled: true,
+  store.upsertTokenMetadata({
+    mint: WSOL_MINT,
+    symbol: "SOL",
+    name: "Wrapped SOL",
+    decimals: 9,
+    usdPrice: 185,
+    priceUpdatedAtMs: Date.now(),
+    updatedAtMs: Date.now(),
   });
 
+  return { store, logger, dispatcher, service };
+}
+
+async function runReplayDemo(args: readonly string[]): Promise<void> {
+  const cluster = parseClusterArg(getFlagValue(args, "--cluster"));
+  const minSolArg = getFlagValue(args, "--min-sol") ?? "0.1";
+  const minSolLamports = parseSolToLamports(minSolArg);
+  const uiMode = args.includes("--ui");
+  const portArg = Number(getFlagValue(args, "--port") ?? "3000");
+  const port = Number.isInteger(portArg) && portArg >= 0 && portArg <= 65_535 ? portArg : 3000;
+
+  const { store, logger, dispatcher, service } = createReplayService({
+    cluster,
+    minSolLamports,
+  });
+
+  await service.addWallet(TREASURY_WALLET, "Main Treasury");
+  service.upsertRule(
+    {
+      id: parseRuleId("demo-policy"),
+      walletAddress: null,
+      minSolLamports,
+      eventTypes: ["sol_transfer", "spl_transfer", "dex_swap", "program_interaction"],
+      mintAllowlist: [],
+      mintDenylist: [SPAM_MINT],
+      includeFailed: false,
+      cooldownSeconds: 0,
+      enabled: true,
+    },
+    { managedByEnv: false },
+  );
+
   writeLine("=== solwatch offline replay demo ===");
-  writeLine("Watching: Main Treasury (9xQe...usVFin)");
-  writeLine("Policy: min 0.1 SOL | ignore failed txs | denylist spam mint\n");
+  writeLine(`Cluster: ${cluster} | Watching: Main Treasury (9xQe...usVFin)`);
+  writeLine(`Policy: min ${minSolArg} SOL | ignore failed txs | denylist spam mint\n`);
 
   const sequence: ReadonlyArray<{ label: string; sig: TxSignature }> = [
     { label: "1. Native SOL inflow (2.5 SOL)", sig: SIG_SOL_IN },
@@ -251,19 +301,72 @@ async function runReplayDemo(): Promise<void> {
   writeLine(
     `Processed: ${metrics.processedTotal} | Dispatched: ${metrics.dispatchedTotal} | Deduped: ${metrics.dedupedTotal} | Filtered: ${metrics.filteredTotal}`,
   );
+
+  if (!uiMode) {
+    store.close();
+    return;
+  }
+
+  const shutdownController = new AbortController();
+  const app = createApiApp({
+    service,
+    store,
+    cluster,
+    dashboardEnabled: true,
+    priceEnrichmentEnabled: true,
+    getWatcherStatus: () => ({
+      running: true,
+      watchedCount: store.countWallets(true),
+      reconnectsTotal: 0,
+    }),
+    channels: dispatcher.getChannels(),
+    logger,
+    shutdownSignal: shutdownController.signal,
+  });
+
+  const server = serve({
+    fetch: app.fetch,
+    hostname: "127.0.0.1",
+    port,
+  });
+
+  const addrInfo = server.address();
+  const resolvedPort = typeof addrInfo === "object" && addrInfo ? addrInfo.port : port;
+  writeLine(`\nDashboard console ready at http://127.0.0.1:${resolvedPort}/`);
+  writeLine(`OpenAPI docs ready at   http://127.0.0.1:${resolvedPort}/docs`);
+  writeLine("Press Ctrl+C to stop.");
+
+  const pulseTimer = setInterval(() => {
+    void service.sendTestAlert(TREASURY_WALLET, shutdownController.signal);
+  }, 10_000);
+  pulseTimer.unref();
+
+  await new Promise<void>((resolve) => {
+    process.once("SIGINT", () => resolve());
+    process.once("SIGTERM", () => resolve());
+  });
+
+  clearInterval(pulseTimer);
+  shutdownController.abort();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   store.close();
 }
 
-async function runLiveDemo(rawWallet: string): Promise<void> {
+async function runLiveDemo(rawWallet: string, args: readonly string[]): Promise<void> {
   const wallet = parseWalletAddress(rawWallet);
   const config = parseEnvConfig();
+  const cluster = parseClusterArg(getFlagValue(args, "--cluster") ?? config.solanaCluster);
+  const minSolArg = getFlagValue(args, "--min-sol");
+  const minSolLamports =
+    minSolArg !== undefined ? parseSolToLamports(minSolArg) : config.minSolAlertLamports;
+
   const logger = createLogger("info");
   const store = new SqliteStore(":memory:");
 
   const dispatcher = new AlertDispatcher({
     notifiers: [new ConsoleNotifier()],
     store,
-    cluster: config.solanaCluster,
+    cluster,
     logger,
   });
   const rpcPort = new SolanaRpcClient(config.solanaRpcUrl, {
@@ -271,7 +374,8 @@ async function runLiveDemo(rawWallet: string): Promise<void> {
   });
   const service = new MonitorService({ store, rpcPort, dispatcher, logger });
   service.ensureDefaultGlobalRule({
-    minSolLamports: config.minSolAlertLamports,
+    minSolLamports,
+    defaultMinUsd: config.minUsdAlert,
     includeFailed: config.includeFailedTx,
     cooldownSeconds: config.defaultCooldownSeconds,
   });
@@ -289,7 +393,7 @@ async function runLiveDemo(rawWallet: string): Promise<void> {
   });
 
   writeLine(
-    `Watching live wallet ${wallet} on ${config.solanaCluster} (${redactUrlSecrets(config.solanaWsUrl)}). Press Ctrl+C to stop.`,
+    `Watching live wallet ${wallet} on ${cluster} (${redactUrlSecrets(config.solanaWsUrl)}). Press Ctrl+C to stop.`,
   );
   await watcher.start();
 
@@ -307,15 +411,17 @@ const liveIdx = args.indexOf("--live");
 if (liveIdx >= 0) {
   const targetWallet = args[liveIdx + 1];
   if (!targetWallet) {
-    process.stderr.write("Usage: npm run demo -- --live <solana_wallet_address>\n");
+    process.stderr.write(
+      "Usage: npm run demo -- --live <solana_wallet_address> [--cluster devnet] [--min-sol 0]\n",
+    );
     process.exit(1);
   }
-  runLiveDemo(targetWallet).catch((err: unknown) => {
+  runLiveDemo(targetWallet, args).catch((err: unknown) => {
     process.stderr.write(`Live demo failed: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
 } else {
-  runReplayDemo().catch((err: unknown) => {
+  runReplayDemo(args).catch((err: unknown) => {
     process.stderr.write(`Demo failed: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
