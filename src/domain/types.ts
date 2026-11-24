@@ -92,6 +92,7 @@ export type AlertRule = {
   readonly id: RuleId;
   readonly walletAddress: WalletAddress | null;
   readonly minSolLamports: bigint;
+  readonly minUsd?: number | null | undefined;
   readonly eventTypes: readonly EventType[];
   readonly mintAllowlist: readonly MintAddress[];
   readonly mintDenylist: readonly MintAddress[];

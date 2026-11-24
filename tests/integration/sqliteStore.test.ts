@@ -54,7 +54,7 @@ describe("SqliteStore", () => {
 
     const store1 = track(new SqliteStore(dbPath));
     expect(store1.getJournalMode()).toBe("wal");
-    expect(store1.getSchemaVersion()).toBe(2);
+    expect(store1.getSchemaVersion()).toBe(3);
     expect(store1.ping()).toBe(true);
 
     const created = store1.createWallet(walletA, "Treasury");
@@ -163,7 +163,7 @@ describe("SqliteStore", () => {
     legacyDb.close();
 
     const migrated = track(new SqliteStore(dbPath));
-    expect(migrated.getSchemaVersion()).toBe(2);
+    expect(migrated.getSchemaVersion()).toBe(3);
     expect(migrated.getWallet(walletA)?.lastSignature).toBe(SIG_SOL_IN);
     expect(migrated.tryMarkSignatureProcessed(walletA, sigIn, 310_000_100n, "sol_transfer")).toBe(
       false,
@@ -194,6 +194,7 @@ describe("SqliteStore", () => {
         id: ruleId,
         walletAddress: walletA,
         minSolLamports: hugeLamports,
+        minUsd: 125.5,
         eventTypes: ["sol_transfer", "dex_swap"],
         mintAllowlist: [USDC_MINT],
         mintDenylist: [BONK_MINT],
@@ -205,15 +206,29 @@ describe("SqliteStore", () => {
     );
 
     expect(store.isRuleManagedByEnv(ruleId)).toBe(true);
+    expect(store.getRule(ruleId)?.minUsd).toBe(125.5);
     const rules = store.listRulesForWallet(walletA);
     expect(rules).toHaveLength(1);
     expect(rules[0]?.minSolLamports).toBe(hugeLamports);
+    expect(rules[0]?.minUsd).toBe(125.5);
     expect(rules[0]?.mintAllowlist).toEqual([USDC_MINT]);
     expect(rules[0]?.mintDenylist).toEqual([BONK_MINT]);
     expect(rules[0]?.includeFailed).toBe(true);
     expect(rules[0]?.cooldownSeconds).toBe(45);
 
+    store.upsertTokenMetadata({
+      mint: USDC_MINT,
+      symbol: "USDC",
+      name: "USD Coin",
+      decimals: 6,
+      usdPrice: 1,
+      priceUpdatedAtMs: 1_760_000_000_000,
+      updatedAtMs: 1_760_000_000_000,
+    });
+    expect(store.getTokenMetadata(USDC_MINT)?.usdPrice).toBe(1);
+
     expect(store.deleteRule(ruleId)).toBe(true);
+    expect(store.getRule(ruleId)).toBeNull();
     expect(store.deleteRule(ruleId)).toBe(false);
     expect(store.isRuleManagedByEnv(ruleId)).toBe(false);
   });

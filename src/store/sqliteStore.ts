@@ -7,6 +7,7 @@ import {
   type AlertRule,
   deserializeOnChainEvent,
   type EventType,
+  type MintAddress,
   type OnChainEvent,
   parseMintAddress,
   parseRuleId,
@@ -42,6 +43,7 @@ const RuleRowSchema = z.object({
   id: z.string(),
   wallet_address: z.string().nullable(),
   min_sol_lamports: z.string(),
+  min_usd: z.number().nullable().optional().default(null),
   event_types_json: z.string(),
   mint_allowlist_json: z.string(),
   mint_denylist_json: z.string(),
@@ -49,6 +51,16 @@ const RuleRowSchema = z.object({
   cooldown_seconds: z.number().int(),
   enabled: z.number().int(),
   managed_by_env: z.number().int(),
+});
+
+const TokenMetadataRowSchema = z.object({
+  mint: z.string(),
+  symbol: z.string(),
+  name: z.string(),
+  decimals: z.number().int(),
+  usd_price: z.number().nullable(),
+  price_updated_at_ms: z.number().int().nullable(),
+  updated_at_ms: z.number().int(),
 });
 
 const DeliveryRowSchema = z.object({
@@ -178,6 +190,16 @@ export type PruneHistoryResult = {
   readonly deliveriesDeleted: number;
 };
 
+export type CachedTokenMetadata = {
+  readonly mint: MintAddress;
+  readonly symbol: string;
+  readonly name: string;
+  readonly decimals: number;
+  readonly usdPrice: number | null;
+  readonly priceUpdatedAtMs: number | null;
+  readonly updatedAtMs: number;
+};
+
 const BASE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS watched_wallets (
   address TEXT PRIMARY KEY,
@@ -195,6 +217,7 @@ CREATE TABLE IF NOT EXISTS alert_rules (
   id TEXT PRIMARY KEY,
   wallet_address TEXT REFERENCES watched_wallets(address) ON DELETE CASCADE,
   min_sol_lamports TEXT NOT NULL,
+  min_usd REAL,
   event_types_json TEXT NOT NULL,
   mint_allowlist_json TEXT NOT NULL,
   mint_denylist_json TEXT NOT NULL,
@@ -263,6 +286,16 @@ CREATE TABLE IF NOT EXISTS pending_signatures (
   created_at TEXT NOT NULL,
   PRIMARY KEY (wallet_address, signature)
 );
+
+CREATE TABLE IF NOT EXISTS token_metadata (
+  mint TEXT PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  name TEXT NOT NULL,
+  decimals INTEGER NOT NULL,
+  usd_price REAL,
+  price_updated_at_ms INTEGER,
+  updated_at_ms INTEGER NOT NULL
+);
 `;
 
 const INDEXES_SQL = `
@@ -299,11 +332,14 @@ type PreparedStatements = {
   readonly updateLastSigMonotonic: StatementSync;
   readonly updateLastRpcSigMonotonic: StatementSync;
   readonly upsertRule: StatementSync;
+  readonly getRule: StatementSync;
   readonly getRuleManagedByEnv: StatementSync;
   readonly deleteRule: StatementSync;
   readonly listRulesGlobal: StatementSync;
   readonly listRulesForWallet: StatementSync;
   readonly listAllRules: StatementSync;
+  readonly getTokenMetadata: StatementSync;
+  readonly upsertTokenMetadata: StatementSync;
   readonly insertProcessedSignature: StatementSync;
   readonly recordDelivery: StatementSync;
   readonly upsertOutboxItem: StatementSync;
@@ -376,7 +412,7 @@ export class SqliteStore {
       .object({ user_version: z.number().int() })
       .parse(versionRow).user_version;
 
-    if (currentVersion >= 2) {
+    if (currentVersion >= 3) {
       return;
     }
 
@@ -410,6 +446,9 @@ export class SqliteStore {
           "ALTER TABLE alert_rules ADD COLUMN managed_by_env INTEGER NOT NULL DEFAULT 0;",
         );
       }
+      if (!ruleCols.has("min_usd")) {
+        this.db.exec("ALTER TABLE alert_rules ADD COLUMN min_usd REAL;");
+      }
 
       const sigCols = this.db
         .prepare("PRAGMA table_info(processed_signatures)")
@@ -435,7 +474,7 @@ export class SqliteStore {
       }
 
       this.db.exec(INDEXES_SQL);
-      this.db.exec("PRAGMA user_version = 2;");
+      this.db.exec("PRAGMA user_version = 3;");
     });
   }
 
@@ -482,12 +521,13 @@ export class SqliteStore {
       ),
       upsertRule: this.db.prepare(
         `INSERT INTO alert_rules (
-           id, wallet_address, min_sol_lamports, event_types_json,
+           id, wallet_address, min_sol_lamports, min_usd, event_types_json,
            mint_allowlist_json, mint_denylist_json, include_failed, cooldown_seconds, enabled, managed_by_env
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            wallet_address = excluded.wallet_address,
            min_sol_lamports = excluded.min_sol_lamports,
+           min_usd = excluded.min_usd,
            event_types_json = excluded.event_types_json,
            mint_allowlist_json = excluded.mint_allowlist_json,
            mint_denylist_json = excluded.mint_denylist_json,
@@ -496,6 +536,7 @@ export class SqliteStore {
            enabled = excluded.enabled,
            managed_by_env = excluded.managed_by_env`,
       ),
+      getRule: this.db.prepare("SELECT * FROM alert_rules WHERE id = ?"),
       getRuleManagedByEnv: this.db.prepare("SELECT managed_by_env FROM alert_rules WHERE id = ?"),
       deleteRule: this.db.prepare("DELETE FROM alert_rules WHERE id = ?"),
       listRulesGlobal: this.db.prepare("SELECT * FROM alert_rules WHERE wallet_address IS NULL"),
@@ -503,6 +544,19 @@ export class SqliteStore {
         "SELECT * FROM alert_rules WHERE wallet_address = ? OR wallet_address IS NULL",
       ),
       listAllRules: this.db.prepare("SELECT * FROM alert_rules"),
+      getTokenMetadata: this.db.prepare("SELECT * FROM token_metadata WHERE mint = ?"),
+      upsertTokenMetadata: this.db.prepare(
+        `INSERT INTO token_metadata (
+           mint, symbol, name, decimals, usd_price, price_updated_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(mint) DO UPDATE SET
+           symbol = excluded.symbol,
+           name = excluded.name,
+           decimals = excluded.decimals,
+           usd_price = excluded.usd_price,
+           price_updated_at_ms = excluded.price_updated_at_ms,
+           updated_at_ms = excluded.updated_at_ms`,
+      ),
       insertProcessedSignature: this.db.prepare(
         `INSERT INTO processed_signatures (wallet_address, signature, slot, event_kind, processed_at)
          VALUES (?, ?, ?, ?, ?)
@@ -735,6 +789,7 @@ export class SqliteStore {
       rule.id,
       rule.walletAddress,
       rule.minSolLamports.toString(),
+      rule.minUsd ?? null,
       JSON.stringify(rule.eventTypes),
       JSON.stringify(rule.mintAllowlist),
       JSON.stringify(rule.mintDenylist),
@@ -742,6 +797,38 @@ export class SqliteStore {
       rule.cooldownSeconds,
       rule.enabled ? 1 : 0,
       managedByEnv,
+    );
+  }
+
+  getRule(id: RuleId): AlertRule | null {
+    const row = this.stmts.getRule.get(id);
+    return row ? this.mapRuleRow(row) : null;
+  }
+
+  getTokenMetadata(mint: MintAddress): CachedTokenMetadata | null {
+    const row = this.stmts.getTokenMetadata.get(mint);
+    if (!row) return null;
+    const parsed = TokenMetadataRowSchema.parse(row);
+    return {
+      mint: parseMintAddress(parsed.mint),
+      symbol: parsed.symbol,
+      name: parsed.name,
+      decimals: parsed.decimals,
+      usdPrice: parsed.usd_price,
+      priceUpdatedAtMs: parsed.price_updated_at_ms,
+      updatedAtMs: parsed.updated_at_ms,
+    };
+  }
+
+  upsertTokenMetadata(entry: CachedTokenMetadata): void {
+    this.stmts.upsertTokenMetadata.run(
+      entry.mint,
+      entry.symbol,
+      entry.name,
+      entry.decimals,
+      entry.usdPrice,
+      entry.priceUpdatedAtMs,
+      entry.updatedAtMs,
     );
   }
 
@@ -1168,6 +1255,7 @@ export class SqliteStore {
       id: parseRuleId(row.id),
       walletAddress: row.wallet_address !== null ? parseWalletAddress(row.wallet_address) : null,
       minSolLamports: BigInt(row.min_sol_lamports),
+      minUsd: row.min_usd,
       eventTypes,
       mintAllowlist,
       mintDenylist,

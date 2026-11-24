@@ -84,6 +84,7 @@ function evaluateSingleRule(
   rule: AlertRule,
   cooldownStore: CooldownStore,
   nowMs: number,
+  estimatedUsd: number | null,
 ): string | null {
   if (!event.success && !rule.includeFailed) {
     return "failed_tx_suppressed";
@@ -93,6 +94,15 @@ function evaluateSingleRule(
   }
   if (cooldownStore.isOnCooldown(event.wallet, event.kind, rule.cooldownSeconds, nowMs, rule.id)) {
     return "cooldown_active";
+  }
+  if (
+    rule.minUsd !== undefined &&
+    rule.minUsd !== null &&
+    rule.minUsd > 0 &&
+    estimatedUsd !== null &&
+    estimatedUsd < rule.minUsd
+  ) {
+    return "below_min_usd";
   }
 
   switch (event.kind) {
@@ -129,6 +139,7 @@ export function evaluateAlertRules(
   rules: readonly AlertRule[],
   cooldownStore: CooldownStore,
   nowMs: number = Date.now(),
+  estimatedUsd: number | null = null,
 ): RuleEvaluationResult {
   const enabledRules = rules.filter((r) => r.enabled);
   const walletSpecific = enabledRules.filter((r) => r.walletAddress === event.wallet);
@@ -143,7 +154,7 @@ export function evaluateAlertRules(
 
   let lastRejectReason = "no_rule_matched";
   for (const rule of applicable) {
-    const rejectReason = evaluateSingleRule(event, rule, cooldownStore, nowMs);
+    const rejectReason = evaluateSingleRule(event, rule, cooldownStore, nowMs, estimatedUsd);
     if (rejectReason === null) {
       return { matched: true, matchedRuleId: rule.id, reason: "matched" };
     }

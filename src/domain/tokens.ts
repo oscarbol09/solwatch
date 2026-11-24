@@ -89,6 +89,47 @@ export function formatLamportsAsSol(lamports: bigint, maxFractionDigits = 4): st
   return formatUnits(lamports, 9, maxFractionDigits);
 }
 
+export function formatGroupedInteger(digits: string): string {
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+export function formatDisplayUnits(
+  rawAmount: bigint,
+  decimals: number,
+  maxFractionDigits = 4,
+): string {
+  const formatted = formatUnits(rawAmount, decimals, maxFractionDigits);
+  const sign = formatted.startsWith("-") ? "-" : "";
+  const unsigned = sign ? formatted.slice(1) : formatted;
+
+  if (rawAmount !== 0n && unsigned === "0" && maxFractionDigits > 0) {
+    return `${sign}<0.${"0".repeat(maxFractionDigits - 1)}1`;
+  }
+
+  const [wholePart = "0", fracPart] = unsigned.split(".");
+  const groupedWhole = formatGroupedInteger(wholePart);
+  return fracPart !== undefined && fracPart.length > 0
+    ? `${sign}${groupedWhole}.${fracPart}`
+    : `${sign}${groupedWhole}`;
+}
+
+export function formatDisplaySol(lamports: bigint, maxFractionDigits = 4): string {
+  return formatDisplayUnits(lamports, 9, maxFractionDigits);
+}
+
+export function formatUsdValue(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) {
+    return "$0.00";
+  }
+  if (usd < 0.01) {
+    return "<$0.01";
+  }
+  if (usd >= 1_000_000) {
+    return `$${(usd / 1_000_000).toFixed(2)}M`;
+  }
+  return `$${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 export function parseSolToLamports(input: string): bigint {
   const trimmed = input.trim();
   if (!/^\d+(\.\d+)?$/.test(trimmed)) {
