@@ -4,6 +4,10 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    reporters: process.env.CI ? ["default", "junit"] : ["default"],
+    outputFile: {
+      junit: "coverage/junit.xml",
+    },
     clearMocks: true,
     restoreMocks: true,
     coverage: {
