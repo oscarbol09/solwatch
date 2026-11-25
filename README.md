@@ -148,7 +148,7 @@ npm run demo -- --live 9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin --cluster ma
    # Register a wallet to monitor
    curl -X POST http://localhost:3000/api/wallets \
      -H "Content-Type: application/json" \
-     -H "Authorization: Bearer YOUR_API_TOKEN_HERE" \
+     -H "Authorization: Bearer ${API_TOKEN}" \
      -d '{"address":"9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin","label":"Main Treasury"}'
    ```
 
