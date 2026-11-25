@@ -1,6 +1,6 @@
 import { HttpResponse, http } from "msw";
 import { setupServer } from "msw/node";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { classifyParsedTransaction } from "../../src/domain/classifier.js";
 import { NotifierError, ValidationError } from "../../src/domain/errors.js";
 import { parseWalletAddress } from "../../src/domain/types.js";
@@ -298,5 +298,59 @@ describe("multi-channel notifiers and dispatcher (MSW contract tests)", () => {
     const aborted = new AbortController();
     aborted.abort();
     await expect(notifier.send(envelope, aborted.signal)).rejects.toThrow(NotifierError);
+  });
+
+  it("ConsoleNotifier handles default and custom writer", async () => {
+    let captured = "";
+    const custom = new ConsoleNotifier((text) => {
+      captured += text;
+    });
+    const defaultConsole = new ConsoleNotifier();
+    expect(defaultConsole.channel).toBe("console");
+
+    const event = classifyParsedTransaction(makeJupiterSwapTx(), watched);
+    const envelope = buildAlertEnvelope(event, "Treasury", "mainnet-beta", "del_console_1");
+    await custom.send(envelope);
+    expect(captured).toContain("Swap on Jupiter");
+
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await defaultConsole.send(envelope);
+    expect(stdoutSpy).toHaveBeenCalled();
+    stdoutSpy.mockRestore();
+  });
+
+  it("TelegramNotifier selects tokenIn as primary mint when tokenOut is WSOL", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    server.use(
+      http.post("https://api.telegram.org/botTOKEN_SWAP_OUT/sendMessage", async ({ request }) => {
+        capturedBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ ok: true, result: { message_id: 101 } });
+      }),
+    );
+
+    const notifier = new TelegramNotifier({
+      botToken: "TOKEN_SWAP_OUT",
+      chatId: "12345",
+    });
+
+    const event = classifyParsedTransaction(makeJupiterSwapTx(), watched);
+    if (event.kind !== "dex_swap") throw new Error("expected dex_swap");
+
+    // Invert swap legs so tokenOut is WSOL
+    const sellTokenEvent = {
+      ...event,
+      tokenIn: event.tokenOut,
+      tokenOut: event.tokenIn,
+    };
+    const envelope = buildAlertEnvelope(
+      sellTokenEvent,
+      "Swap Reverse",
+      "mainnet-beta",
+      "del_rev_1",
+    );
+    await notifier.send(envelope);
+
+    const kbText = JSON.stringify(capturedBody?.reply_markup);
+    expect(kbText).toContain("dexscreener.com/solana/");
   });
 });

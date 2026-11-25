@@ -177,4 +177,72 @@ describe("alert rules engine and cooldowns", () => {
       ),
     );
   });
+
+  it("handles CooldownTracker LRU eviction, key replacement, and clear cleanly", () => {
+    const tracker = new CooldownTracker();
+    expect(tracker.isOnCooldown(watched, "sol_transfer", 0, 1000)).toBe(false);
+    expect(tracker.isOnCooldown(watched, "sol_transfer", 60, 1000)).toBe(false);
+
+    // Record and replace existing key
+    tracker.record(watched, "sol_transfer", 1000);
+    tracker.record(watched, "sol_transfer", 2000);
+    expect(tracker.isOnCooldown(watched, "sol_transfer", 60, 2500)).toBe(true);
+
+    // Verify clear() empties tracked timestamps
+    tracker.clear();
+    expect(tracker.isOnCooldown(watched, "sol_transfer", 60, 2500)).toBe(false);
+
+    // Test LRU capacity bound eviction by populating past MAX_ENTRIES
+    const maxEntries = (CooldownTracker as unknown as { MAX_ENTRIES: number }).MAX_ENTRIES;
+    const testWallet = parseWalletAddress("11111111111111111111111111111111");
+    // Directly prefill the internal map close to max to test the eviction branch efficiently
+    const internalMap = (tracker as unknown as { lastTriggeredMs: Map<string, number> })
+      .lastTriggeredMs;
+    for (let i = 0; i < maxEntries; i += 1) {
+      internalMap.set(`key-${i}`, i);
+    }
+    expect(internalMap.size).toBe(maxEntries);
+    // Recording one more key when at maxEntries triggers eviction of oldest
+    tracker.record(testWallet, "program_interaction", 99_999);
+    expect(internalMap.size).toBe(maxEntries);
+    expect(internalMap.has("key-0")).toBe(false);
+  });
+
+  it("handles edge branches: no_enabled_rules, below_min_usd, mint_not_in_allowlist, and dex_swap minSolLamports", () => {
+    const tracker = new CooldownTracker();
+    const solIn = classifyParsedTransaction(makeIncomingSolTx(), watched);
+    const splUsdc = classifyParsedTransaction(makeSplUsdcTransferTx(), watched);
+    const jupSwap = classifyParsedTransaction(makeJupiterSwapTx(), watched);
+
+    // No enabled rules -> no_enabled_rules
+    const disabledRule = makeRule({ enabled: false });
+    expect(evaluateAlertRules(solIn, [disabledRule], tracker, 1000)).toEqual({
+      matched: false,
+      matchedRuleId: null,
+      reason: "no_enabled_rules",
+    });
+    expect(evaluateAlertRules(solIn, [], tracker, 1000)).toEqual({
+      matched: false,
+      matchedRuleId: null,
+      reason: "no_enabled_rules",
+    });
+
+    // minUsd threshold filtering
+    const minUsdRule = makeRule({ minUsd: 500 });
+    const usdRejected = evaluateAlertRules(solIn, [minUsdRule], tracker, 1000, 250);
+    expect(usdRejected.matched).toBe(false);
+    expect(usdRejected.reason).toBe("below_min_usd");
+
+    // mint_not_in_allowlist
+    const bonkOnlyRule = makeRule({ mintAllowlist: [BONK_MINT] });
+    const mintReject = evaluateAlertRules(splUsdc, [bonkOnlyRule], tracker, 1000);
+    expect(mintReject.matched).toBe(false);
+    expect(mintReject.reason).toBe("mint_not_in_allowlist");
+
+    // dex_swap with WSOL leg below minSolLamports
+    const highSolSwapRule = makeRule({ minSolLamports: 100n * LAMPORTS_PER_SOL });
+    const swapReject = evaluateAlertRules(jupSwap, [highSolSwapRule], tracker, 1000);
+    expect(swapReject.matched).toBe(false);
+    expect(swapReject.reason).toBe("below_min_sol");
+  });
 });
