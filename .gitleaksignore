@@ -1,0 +1,2 @@
+# Gitleaks ignore list for documentation examples and false positives
+364f18fa2d746b38d36c90b08e2369e977e9b81b:README.md:curl-auth-header:149

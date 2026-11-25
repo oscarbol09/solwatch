@@ -1,10 +1,33 @@
 {
   "name": "solwatch",
   "version": "0.1.0",
-  "description": "Real-time Solana wallet monitor and multi-channel alert router",
+  "description": "Production-grade, read-only Solana wallet monitor and multi-channel alert router built with TypeScript, @solana/kit, Node 24 SQLite WAL, and zero cloud infrastructure cost.",
   "private": true,
   "type": "module",
-  "license": "UNLICENSED",
+  "author": "Oscar Bolaño <oscarbol09@gmail.com> (https://github.com/oscarbol09)",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://github.com/oscarbol09/solwatch#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oscarbol09/solwatch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/oscarbol09/solwatch/issues"
+  },
+  "keywords": [
+    "solana",
+    "solana-kit",
+    "wallet-tracker",
+    "sqlite-wal",
+    "telegram-bot",
+    "blockchain",
+    "crypto-alerts",
+    "jupiter-ag",
+    "helius",
+    "hono",
+    "pino",
+    "web3"
+  ],
   "engines": {
     "node": ">=24.0.0"
   },

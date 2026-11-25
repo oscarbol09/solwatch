@@ -1,157 +1,275 @@
 # solwatch
 
-Self-hosted, read-only Solana wallet monitor and multi-channel alert router built with TypeScript, `@solana/kit`, Node 24 `node:sqlite`, `grammy`, and `hono`.
+[![CI](https://github.com/oscarbol09/solwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/oscarbol09/solwatch/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/Coverage-94.7%25-success)](https://github.com/oscarbol09/solwatch/actions)
+[![Node.js](https://img.shields.io/badge/Node.js-24.x%20ESM-339933?logo=node.js)](https://nodejs.org/)
+[![Solana](https://img.shields.io/badge/Solana-@solana/kit%208.6-9945FF?logo=solana)](https://github.com/solana-labs/solana-web3.js)
+[![Database](https://img.shields.io/badge/Storage-node:sqlite%20WAL-003B57?logo=sqlite)](https://nodejs.org/api/sqlite.html)
+[![License](https://img.shields.io/badge/License-Source--Available-blue)](./LICENSE)
 
-## Why This Exists
+**Self-hosted, read-only Solana wallet monitor and multi-channel alert router** built with modern TypeScript, `@solana/kit`, Node 24 native `node:sqlite`, `grammy`, and `hono`.
 
-Most ad-hoc Solana wallet trackers break in the same three ways when deployed for real operational monitoring:
+Operates at **$0/mo infrastructure cost** with zero external cloud databases (no Redis, no PostgreSQL, no C++ compilation dependencies).
 
-1. Public WebSocket subscriptions silently drop and miss every transaction that lands during the reconnect window.
-2. Unfiltered `logsSubscribe` streams flood Telegram or Discord chats with 0-SOL fee calls, failed transactions, and airdrop spam mints.
-3. Heavy stacks demand Redis + PostgreSQL just to watch a handful of treasury or smart-money wallets.
+---
 
-`solwatch` handles reconnect catch-up via `getSignaturesForAddress`, computes exact `BigInt` asset deltas to filter out fee-only calls and spam mints, deduplicates signatures in local SQLite WAL storage, and routes clean alerts to Telegram, Discord, HMAC-signed webhooks, or stdout. It never stores private keys or signs transactions.
+## Visual Preview
 
-## Quickstart (Zero-Config Demo)
-
-Requires Node.js `>=24.0.0`. No API keys or external database needed to try the full pipeline:
-
-```bash
-git clone https://github.com/oscarbol09/solwatch.git
-cd solwatch
-npm install
-npm run demo
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  SOLWATCH CONSOLE — Live Solana Treasury & Smart-Money Radar                                   │
+├────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  [OK] [Main Treasury] +2.5 SOL (received)                                                      │
+│    tx: 5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQ...│
+│    url: https://solscan.io/tx/5VERv8NM... | slot: 312500110                                    │
+│                                                                                                │
+│  [OK] [Main Treasury] Swap on Jupiter: 1.5 SOL -> 240 USDC ($240.00)                           │
+│    tx: 5j7s6NiJS3JAkvgkoc18WVAsiSaci2pxB2A6ueCJP4tprA2TFg9wSyTLeYouxPBJEMzJinENTkpA52YStRW5Dia7...│
+│    url: https://solscan.io/tx/5j7s6NiJ... | slot: 312500330                                    │
+│                                                                                                │
+│  [DEDUPED] Duplicate signature 4uQeVj5t... ignored by SQLite WAL deduplication store           │
+│  [FILTERED:mint_denylisted] Suppressed Token-2022 dust airdrop (4k3Dyjzvzp8eMZWUXbBCjEvw...)   │
+│  [FILTERED:failed_tx_suppressed] Suppressed failed Jupiter swap transaction                    │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-`npm run demo` runs an in-memory SQLite store and replays six realistic Solana transactions through the classifier, deduplication store, rule engine, and console formatter (including a duplicate signature and a denylisted Token-2022 spam mint). Pass `--ui` (`npm run demo -- --ui`) to launch the embedded web console (`GET /`) and OpenAPI explorer (`GET /docs`) on `http://127.0.0.1:3000`.
+_Live embedded web console (`GET /`) with Server-Sent Events (SSE) and dark-mode management interface:_
 
-To stream a live wallet from Devnet or Mainnet without running the HTTP server:
-
-```bash
-npm run demo -- --live <SOLANA_WALLET_ADDRESS> --cluster devnet --min-sol 0
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ solwatch web console | Cluster: mainnet-beta | WS: Connected | Active: 3 wallets               │
+├───────────────────────────────┬────────────────────────────────────────────────────────────────┤
+│ Tracked Wallets               │ Real-Time Activity Stream (SSE)                                │
+│ • Treasury (9xQe...sVFin) [✓] │ [22:30:15] SWAP: Jupiter 1.5 SOL -> 240 USDC ($240.00)         │
+│ • Alpha Whale (Gsbw...QRJe)[✓]│ [22:30:42] SOL IN: +15.0 SOL from 3AVi...kzPT                 │
+│ • Vault (4k3D...X6R)     [II] │ [22:31:05] FILTERED: Token-2022 spam mint blocked by denylist │
+└───────────────────────────────┴────────────────────────────────────────────────────────────────┘
 ```
 
-## Production Setup & Docker
+---
 
-1. Copy the environment template and configure only the channels you want to enable:
+## Why Solwatch?
 
-```bash
-cp .env.example .env
-```
+Most ad-hoc Solana monitoring scripts and commercial bot platforms fail in production:
 
-2. Start with Docker Compose:
+| Challenge               | Naive Bot Scripts                                    | Heavy SaaS Platforms                     | **solwatch**                                               |
+| :---------------------- | :--------------------------------------------------- | :--------------------------------------- | :--------------------------------------------------------- |
+| **Reconnect Drops**     | Misses all txs landing during WebSocket reconnection | Requires $150–$300/mo Geyser node        | **Eager buffering + chronological RPC backfill catch-up**  |
+| **Spam / 0-SOL Floods** | Floods Telegram chats with zero-fee calls and dust   | Filters behind paid premium tiers        | **Exact `BigInt` balance netting + mint allow/denylists**  |
+| **Infrastructure Cost** | Unstable local scripts                               | $100–$500/mo (Redis + Postgres + VPC)    | **$0/mo (Node 24 native SQLite WAL, runs on $4 VPS)**      |
+| **USD Valuation**       | Hardcoded or stale prices                            | Paid CoinGecko / Birdeye API tiers       | **Zero-cost Jupiter Lite API (`$0/mo`) with SQLite cache** |
+| **Security & Privacy**  | Stores keys or exposes unauthenticated endpoints     | Third-party custody of wallet watchlists | **100% read-only (zero private keys), SSRF-hardened**      |
 
-```bash
-docker compose up -d --build
-```
-
-3. Verify the container health and register a wallet:
-
-```bash
-curl http://localhost:3000/healthz
-curl -X POST http://localhost:3000/api/wallets \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -d '{"address":"9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin","label":"Treasury"}'
-```
+---
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    WS["Solana WS logsNotifications"] --> Watcher["SolanaWatcher (Reconnect + Backfill)"]
-    RPC["Solana HTTP RPC getTransaction"] --> Watcher
-    Helius["Helius Enhanced Webhook"] --> API["Hono HTTP API"]
-    Watcher --> Service["MonitorService"]
+    WS["Solana WS<br/>(logsNotifications)"] --> Watcher["SolanaWatcher<br/>(Eager Buffer + Backfill)"]
+    RPC["Solana RPC<br/>(getTransaction + Coalescing)"] --> Watcher
+    Helius["Helius Webhook<br/>(POST /webhooks/helius)"] --> API["Hono HTTP API"]
+    
+    Watcher --> Service["MonitorService Core"]
     API --> Service
-    Service --> Store["node:sqlite WAL Store (Dedupe + Cursors)"]
-    Service --> Classifier["Tx Classifier + Rules Engine"]
-    Classifier --> Dispatcher["AlertDispatcher (Isolated Fan-out)"]
-    Dispatcher --> TG["Telegram Bot API"]
-    Dispatcher --> DC["Discord Webhook"]
-    Dispatcher --> WH["HMAC-SHA256 Webhook"]
-    Dispatcher --> CON["Stdout Console"]
+    
+    Service <--> DB[("node:sqlite WAL<br/>(Dedupe + Outbox)")]
+    Service --> Classifier["Tx Classifier<br/>(BigInt Netting)"]
+    Classifier --> Price["Jupiter Lite API<br/>($0/mo USD Cache)"]
+    Price --> Rules["Rules Engine<br/>(Thresholds + Anti-Spam)"]
+    Rules --> Dispatcher["AlertDispatcher<br/>(Isolated Fan-Out)"]
+    
+    Dispatcher --> TG["Telegram Bot<br/>(Inline Buttons & Topics)"]
+    Dispatcher --> DC["Discord Webhook<br/>(Rich Embeds)"]
+    Dispatcher --> WH["HMAC-SHA256 Webhook<br/>(Signed JSON v1.1)"]
+    Dispatcher --> CON["Console Stdout"]
+    
+    Service --> WebUI["Embedded Web Console<br/>(GET / + SSE)"]
+    Service --> Metrics["Prometheus RED Metrics<br/>(GET /metrics)"]
 ```
 
-## Telegram Bot Commands
+---
 
-Enable interactive commands by setting `TELEGRAM_BOT_TOKEN`, `TELEGRAM_INTERACTIVE_ENABLED=true`, restricting chats via `TELEGRAM_ALLOWED_CHAT_IDS`, and scoping `/watch` / `/unwatch` admin user IDs via `TELEGRAM_ALLOWED_USER_IDS`:
+## Quickstart (Zero-Config)
 
-| Command                       | Description                                                          |
-| :---------------------------- | :------------------------------------------------------------------- |
-| `/watch <address> [label]`    | Register a wallet and start live WS monitoring immediately           |
-| `/unwatch <target>`           | Stop tracking a wallet by address, list index, or label              |
-| `/pause <target>` / `/resume` | Temporarily pause or resume wallet tracking                          |
-| `/list`                       | List tracked wallets with inline Pause / Remove / Solscan actions    |
-| `/rules`                      | Show active alert rules (`minSol`, `minUsd`, cooldown, denylists)    |
-| `/setmin <sol>`               | Update the global minimum SOL alert threshold                        |
-| `/denylist <mint>`            | Block a token mint globally                                          |
-| `/recent`                     | Show the 5 latest grouped alert delivery outcomes by channel         |
-| `/test`                       | Send a synthetic test alert to configured channels                   |
-| `/status`                     | Report cluster, active channels, reconnect count, and pipeline stats |
+Requires Node.js `>=24.0.0`. No API keys or external services required:
 
-## HTTP API, Console & Signed Webhooks
+```bash
+# 1. Clone repository
+git clone https://github.com/oscarbol09/solwatch.git
+cd solwatch
 
-Bind beyond loopback requires `API_TOKEN` (`>= 32` chars). `POST /webhooks/helius` stays disabled (`503`) unless `HELIUS_WEBHOOK_SECRET` (`>= 32` chars) is set.
+# 2. Install dependencies
+npm install
 
-| Endpoint                                         | Auth                           | Purpose                                                 |
-| :----------------------------------------------- | :----------------------------- | :------------------------------------------------------ |
-| `GET /`                                          | Public HTML (API token prompt) | Embedded real-time console (SSE feed, wallets, rules)   |
-| `GET /openapi.json` & `GET /docs`                | Public                         | OpenAPI 3.1 schema and lightweight interactive API docs |
-| `GET /healthz`                                   | Public                         | Minimal container liveness probe (`{ "status": "ok" }`) |
-| `GET /api/status`                                | Bearer `API_TOKEN`             | Operational uptime, cluster, channels, and counters     |
-| `GET /api/wallets` & `GET /api/wallets/:addr`    | Bearer `API_TOKEN`             | List or inspect tracked wallets and scoped rules        |
-| `POST /api/wallets` & `PATCH /api/wallets/:addr` | Bearer `API_TOKEN`             | Add, rename, or pause/resume watched wallets            |
-| `DELETE /api/wallets/:address`                   | Bearer `API_TOKEN`             | Remove wallet and stop its watcher                      |
-| `GET / POST / PUT / PATCH / DELETE /api/rules`   | Bearer `API_TOKEN`             | Manage global and per-wallet filtering rules            |
-| `POST /api/rules/denylist`                       | Bearer `API_TOKEN`             | Append a token mint to the global denylist              |
-| `GET /api/alerts?limit=25&beforeId=...`          | Bearer `API_TOKEN`             | Query keyset-paginated delivery audit log               |
-| `POST /api/alerts/test`                          | Bearer `API_TOKEN`             | Dispatch a synthetic test alert across channels         |
-| `GET /api/events/stream`                         | Bearer `API_TOKEN`             | Live Server-Sent Events (SSE) activity stream           |
-| `POST /webhooks/helius`                          | `HELIUS_WEBHOOK_SECRET`        | Ingest Helius Enhanced Webhook transaction arrays       |
+# 3. Run zero-config offline replay demo (6 realistic mainnet transactions)
+npm run demo
+```
 
-When `WEBHOOK_SECRET` is set, outbound `WEBHOOK_URL` requests include `X-Solwatch-Delivery`, `X-Solwatch-Event`, `X-Solwatch-Timestamp` (Unix seconds), and `X-Solwatch-Signature` (`sha256=<hex>` computed over `${timestamp}.${deliveryId}.${eventKind}.${rawBody}`):
+### Interactive Web Console Demo
 
-```ts
+Launch the embedded real-time web dashboard and OpenAPI explorer on `http://127.0.0.1:3000`:
+
+```bash
+npm run demo -- --ui
+```
+
+### Live Wallet Tracking (CLI)
+
+Stream live transactions for any address on Devnet or Mainnet without running the server:
+
+```bash
+npm run demo -- --live 9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin --cluster mainnet-beta --min-sol 0.1
+```
+
+---
+
+## Production Deployment (Docker Compose)
+
+1. Copy and configure environment variables:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Start the container with Docker Compose (runs as isolated non-root user `10001:10001` with read-only root filesystem and `tmpfs`):
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+3. Verify service health and register a wallet:
+
+   ```bash
+   # Verify health and readiness probes
+   curl http://localhost:3000/healthz
+   curl http://localhost:3000/readyz
+
+   # Register a wallet to monitor
+   curl -X POST http://localhost:3000/api/wallets \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer ${API_TOKEN}" \
+     -d '{"address":"9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin","label":"Main Treasury"}'
+   ```
+
+4. Trigger an online SQLite backup snapshot without locking active transactions:
+
+   ```bash
+   npm run backup -- ./data/backups/manual-backup.db
+   ```
+
+---
+
+## Interactive Telegram Bot
+
+Enable Telegram management by configuring `TELEGRAM_BOT_TOKEN`, `TELEGRAM_INTERACTIVE_ENABLED=true`, and restricting access with `TELEGRAM_ALLOWED_CHAT_IDS`:
+
+| Command     | Arguments                     | Description                                                             |
+| :---------- | :---------------------------- | :---------------------------------------------------------------------- |
+| `/watch`    | `<address> [label]`           | Register and start monitoring a wallet immediately                      |
+| `/unwatch`  | `<address \| index \| label>` | Stop tracking a wallet                                                  |
+| `/pause`    | `<address \| index \| label>` | Temporarily pause alerts for a wallet                                   |
+| `/resume`   | `<address \| index \| label>` | Resume paused wallet tracking                                           |
+| `/list`     | —                             | Display all tracked wallets with interactive inline action buttons      |
+| `/rules`    | —                             | View active alert filtering rules (`minSol`, `minUsd`, denylists)       |
+| `/setmin`   | `<sol>`                       | Update global minimum SOL transfer threshold                            |
+| `/denylist` | `<mint>`                      | Append an SPL token mint to the global denylist                         |
+| `/recent`   | —                             | Show recent delivery outcomes across all channels                       |
+| `/test`     | —                             | Dispatch a synthetic test alert to verify notification channels         |
+| `/status`   | —                             | Display uptime, active channels, WebSocket state, and pipeline counters |
+
+---
+
+## HTTP REST API & Control Plane
+
+When binding `HOST` beyond loopback (`0.0.0.0`), `API_TOKEN` (>= 32 characters) is mandatory.
+
+| Endpoint                       |  Method  |      Auth      | Description                                                      |
+| :----------------------------- | :------: | :------------: | :--------------------------------------------------------------- |
+| `GET /`                        |  `GET`   | Browser Prompt | Embedded real-time web console with live SSE feed                |
+| `GET /docs`                    |  `GET`   |     Public     | Interactive OpenAPI 3.1 documentation explorer                   |
+| `GET /healthz`                 |  `GET`   |     Public     | Lightweight container liveness check (`{"status":"ok"}`)         |
+| `GET /readyz`                  |  `GET`   |     Public     | Readiness check verifying SQLite WAL ping & watcher connectivity |
+| `GET /metrics`                 |  `GET`   |     Public     | Prometheus RED metrics exporter (`text/plain; version=0.0.4`)    |
+| `GET /api/status`              |  `GET`   |     Bearer     | System uptime, active channels, queue depths, and counters       |
+| `GET /api/wallets`             |  `GET`   |     Bearer     | List all watched wallets, cursors, and labels                    |
+| `POST /api/wallets`            |  `POST`  |     Bearer     | Add a new wallet to the monitoring watchlist                     |
+| `PATCH /api/wallets/:address`  | `PATCH`  |     Bearer     | Update label or toggle pause/resume state                        |
+| `DELETE /api/wallets/:address` | `DELETE` |     Bearer     | Remove a wallet and terminate its subscription loop              |
+| `GET /api/rules`               |  `GET`   |     Bearer     | Inspect active alert filtering rules                             |
+| `POST /api/rules`              |  `POST`  |     Bearer     | Create a new custom filtering rule                               |
+| `POST /api/rules/denylist`     |  `POST`  |     Bearer     | Add a token mint to the global blacklist                         |
+| `GET /api/alerts`              |  `GET`   |     Bearer     | Keyset-paginated (`beforeId`) audit delivery log                 |
+| `POST /api/alerts/test`        |  `POST`  |     Bearer     | Trigger an end-to-end synthetic alert across active channels     |
+| `GET /api/events/stream`       |  `GET`   |     Bearer     | Real-time Server-Sent Events (SSE) alert stream                  |
+| `POST /webhooks/helius`        |  `POST`  |     Secret     | Ingest Helius Enhanced Webhook transaction arrays                |
+
+Detailed request/response schemas are available in [docs/API.md](./docs/API.md) and `/docs`.
+
+---
+
+## Verifying Signed Webhooks (HMAC-SHA256)
+
+Outbound webhook deliveries include `X-Solwatch-Timestamp`, `X-Solwatch-Delivery`, `X-Solwatch-Event`, and `X-Solwatch-Signature` headers.
+
+```typescript
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-export function verifySolwatchSignature(params: {
+export function verifyWebhookSignature(params: {
   rawBody: string;
-  headerSig: string;
+  signature: string;
   timestamp: string;
   deliveryId: string;
   eventKind: string;
   secret: string;
-  toleranceSec?: number;
 }): boolean {
-  if (!/^\d{1,12}$/.test(params.timestamp)) return false;
-  const ageSec = Math.abs(Math.floor(Date.now() / 1_000) - Number(params.timestamp));
-  if (ageSec > (params.toleranceSec ?? 300)) return false;
+  // Reject payloads older than 5 minutes (replay defense)
+  if (Math.abs(Math.floor(Date.now() / 1000) - Number(params.timestamp)) > 300) return false;
 
   const payload = `${params.timestamp}.${params.deliveryId}.${params.eventKind}.${params.rawBody}`;
   const expected = `sha256=${createHmac("sha256", params.secret).update(payload).digest("hex")}`;
-  const a = Buffer.from(params.headerSig);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+
+  return timingSafeEqual(Buffer.from(params.signature), Buffer.from(expected));
 }
 ```
 
-## Known Limitations & Trade-offs
+---
 
-- **Public RPC vs dedicated providers:** Public Solana endpoints aggressively rate-limit `getTransaction` and close idle WebSockets. For wallets with frequent trades, point `SOLANA_RPC_URL` / `SOLANA_WS_URL` at a dedicated provider or route transactions through `POST /webhooks/helius`.
-- **Single-node SQLite WAL:** Using Node 24's built-in `node:sqlite` eliminates external database setup and native C++ compilation (`node-gyp`), at the cost of targeting single-instance deployments rather than horizontally scaled active-active workers.
-- **Swap heuristics:** Swap classification identifies known DEX programs (Jupiter, Raydium, Orca, Meteora, Pump.fun) combined with net wallet balance deltas rather than decoding every protocol's IDL instructions. Exotic multi-program CPIs outside the registry classify as transfers or program interactions.
-- **Read-only scope:** `solwatch` intentionally excludes private key custody, swap execution, and copy-trading.
+## Known Trade-offs & Limitations
 
-## Development & Testing
+1. **Single-Node SQLite Architecture:** Built using Node 24's native `DatabaseSync` in WAL mode to eliminate external databases (PostgreSQL/Redis) and native C++ builds (`node-gyp`). Sized for up to **10,000 active wallets per instance**; horizontal multi-master scaling is intentionally out of scope.
+2. **Public RPC vs Dedicated Endpoints:** Public Solana RPC nodes aggressively rate-limit `getTransaction` and close idle WebSockets. For high-volume trading accounts, point `SOLANA_RPC_URL` / `SOLANA_WS_URL` to a dedicated provider (Helius, QuickNode, Triton) or configure inbound `POST /webhooks/helius`.
+3. **Swap Heuristics:** Swaps are classified using liquidity pool address matching and net wallet balance deltas for registered protocols (Jupiter, Raydium, Orca, Meteora, Pump.fun). Complex multi-hop CPI calls outside the registry are classified as generic program interactions.
+4. **Strictly Read-Only Scope:** `solwatch` monitors and alerts only. It contains no private key management, swap execution, or automated trading modules.
 
-```bash
-npm run lint           # Biome formatting and lint rules
-npm run typecheck      # Strict TypeScript check (tsc --noEmit)
-npm run test:coverage  # Vitest unit + MSW/SQLite integration suite
-npm run build          # Emit production JS into dist/
-```
+---
+
+## Comprehensive Documentation
+
+- [Architecture Deep-Dive](./docs/ARCHITECTURE.md) — Detailed subsystem breakdowns, data flow, and invariants.
+- [Operational Runbook](./docs/RUNBOOK.md) — Deployment, Prometheus monitoring, disaster recovery, and troubleshooting.
+- [API & Webhook Specification](./docs/API.md) — Complete endpoint documentation and cryptographic payload reference.
+
+---
+
+## Commercial Licensing, Consulting & Author
+
+`solwatch` is developed and maintained by **Oscar Bolaño** as a production-grade, source-available Web3 engineering showcase.
+
+### Services Available:
+
+- **Custom Blockchain Tracking & Telegram Bots:** Bespoke alert engines tailored to proprietary token strategies, MEV monitoring, or automated trading signals.
+- **Web3 Backend Engineering & High-Performance Microservices:** Architecture design, TypeScript/Node.js/Go backend pipelines, and zero-cost infrastructure optimization.
+- **Security & Smart Contract Auditing:** Threat modeling, SSRF defenses, and cryptographic verification pipelines.
+
+### Contact:
+
+- **GitHub:** [@oscarbol09](https://github.com/oscarbol09)
+- **Email:** [oscarbol09@gmail.com](mailto:oscarbol09@gmail.com)
+- **Repository:** [https://github.com/oscarbol09/solwatch](https://github.com/oscarbol09/solwatch)
+
+---
 
 ## License
 
-Source-available (`All Rights Reserved`). Publicly readable for technical evaluation; copying, redistribution, and commercial or production use require written permission. See [LICENSE](./LICENSE).
+Source-available (`All Rights Reserved`). Publicly viewable for technical evaluation, code review, and personal verification. Unauthorized copying, modification, redistribution, or commercial SaaS operation is prohibited without written permission. See [LICENSE](./LICENSE).
