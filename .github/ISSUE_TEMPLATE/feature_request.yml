@@ -1,0 +1,29 @@
+name: Feature Request
+description: Propose a new DEX parser, notification channel, or operational capability
+title: "[feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Have an idea for a new DEX parser, alert channel, or rule capability? Note that solwatch stays strictly read-only with $0/mo SQLite storage.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What use case or blind spot does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the proposed behavior, API/env changes, or parser/notifier interface.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any workarounds or alternative designs considered.
+    validations:
+      required: false

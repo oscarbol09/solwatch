@@ -1,0 +1,55 @@
+name: Bug Report
+description: Report a reproducible bug or unexpected failure in solwatch
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting an issue! Please provide enough context so maintainers and contributors can reproduce it locally.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug and affected endpoint, notifier, or subsystem.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Exact commands, requests, or transaction payload shapes to reproduce the issue.
+      placeholder: |
+        1. Start solwatch with ...
+        2. Send request / trigger transaction ...
+        3. Observe error output
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / Commit
+      placeholder: e.g. 0.1.0 (main / 8fd25b0)
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Node.js & OS Environment
+      placeholder: e.g. Node 24.18.0 on Ubuntu 24.04 / Windows 11 / Docker
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Error Output
+      description: Redact any API tokens, Telegram bot tokens, webhook secrets, or RPC keys before pasting.
+      render: shell
+    validations:
+      required: false

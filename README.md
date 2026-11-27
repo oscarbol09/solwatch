@@ -5,7 +5,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-24.x%20ESM-339933?logo=node.js)](https://nodejs.org/)
 [![Solana](https://img.shields.io/badge/Solana-@solana/kit%208.6-9945FF?logo=solana)](https://github.com/solana-labs/solana-web3.js)
 [![Database](https://img.shields.io/badge/Storage-node:sqlite%20WAL-003B57?logo=sqlite)](https://nodejs.org/api/sqlite.html)
-[![License](https://img.shields.io/badge/License-Source--Available-blue)](./LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
 **Self-hosted, read-only Solana wallet monitor and multi-channel alert router** built with modern TypeScript, `@solana/kit`, Node 24 native `node:sqlite`, `grammy`, and `hono`.
 
@@ -252,9 +252,34 @@ export function verifyWebhookSignature(params: {
 
 ---
 
-## Commercial Licensing, Consulting & Author
+## Contributing
 
-`solwatch` is developed and maintained by **Oscar Bolaño** as a production-grade, source-available Web3 engineering showcase.
+Contributions are welcome!
+
+- **New Contributors:** Browse our [`good first issue`](https://github.com/oscarbol09/solwatch/labels/good%20first%20issue) and [`help wanted`](https://github.com/oscarbol09/solwatch/labels/help%20wanted) issues.
+- **Contributor Guide:** See [CONTRIBUTING.md](./CONTRIBUTING.md) for local setup, architecture guidelines, Conventional Commits, and PR checks.
+- **Code of Conduct:** Participation is governed by our [Code of Conduct](./CODE_OF_CONDUCT.md).
+
+---
+
+## Security
+
+Please report vulnerabilities privately via [SECURITY.md](./SECURITY.md) or [GitHub Security Advisories](https://github.com/oscarbol09/solwatch/security/advisories/new).
+
+---
+
+## Support & Sponsorship
+
+If you find **solwatch** useful in your Solana workflows or treasury monitoring:
+
+- **[Sponsor on GitHub Sponsors](https://github.com/sponsors/oscarbol09)**
+- **[Support on Ko-Fi](https://ko-fi.com/oscarmb09)**
+
+---
+
+## Maintainer, Consulting & Custom Integrations
+
+`solwatch` is developed and maintained by **Oscar Bolaño** as an open-source Web3 engineering project.
 
 ### Services Available:
 
@@ -272,4 +297,4 @@ export function verifyWebhookSignature(params: {
 
 ## License
 
-Source-available (`All Rights Reserved`). Publicly viewable for technical evaluation, code review, and personal verification. Unauthorized copying, modification, redistribution, or commercial SaaS operation is prohibited without written permission. See [LICENSE](./LICENSE).
+Distributed under the [Apache License, Version 2.0](./LICENSE). See [LICENSE](./LICENSE) for full details.

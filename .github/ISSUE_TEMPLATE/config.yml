@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Good First Issues & Help Wanted"
+    url: https://github.com/oscarbol09/solwatch/labels/help%20wanted
+    about: Browse curated open issues looking for community contributors.
+  - name: "Ask a Question / Share Ideas (Discussions)"
+    url: https://github.com/oscarbol09/solwatch/discussions
+    about: Ask setup questions, share wallet tracking setups, or discuss architecture proposals.
+  - name: "Report a Security Vulnerability Privately"
+    url: https://github.com/oscarbol09/solwatch/security/advisories/new
+    about: Privately disclose potential security vulnerabilities to the maintainer.
