@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "author": "Oscar Bolaño <oscarbol09@gmail.com> (https://github.com/oscarbol09)",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "Apache-2.0",
   "homepage": "https://github.com/oscarbol09/solwatch#readme",
   "repository": {
     "type": "git",
