@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApiApp } from "../../src/api/server.js";
-import { parseWalletAddress } from "../../src/domain/types.js";
+import { parseTxSignature, parseWalletAddress } from "../../src/domain/types.js";
 import { createLogger } from "../../src/logger.js";
 import { AlertDispatcher } from "../../src/notifiers/dispatcher.js";
 import type { Notifier } from "../../src/notifiers/types.js";
@@ -10,6 +10,7 @@ import { SqliteStore } from "../../src/store/sqliteStore.js";
 import {
   COUNTERPARTY_WALLET,
   HELIUS_WEBHOOK_FIXTURE,
+  SIG_SOL_IN,
   WATCHED_WALLET_A,
 } from "../fixtures/solanaTransactions.js";
 
@@ -82,6 +83,45 @@ function setupApiTestEnv(
 }
 
 describe("HTTP API server (Hono)", () => {
+  it("serializes persisted wallet slots as exact decimal strings", async () => {
+    const { app, store } = setupApiTestEnv();
+    try {
+      const created = await app.request("/api/wallets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: WATCHED_WALLET_A, label: "Synthetic wallet" }),
+      });
+      expect(created.status).toBe(201);
+      expect(await created.json()).toMatchObject({ wallet: { lastSlot: null, lastRpcSlot: null } });
+      const slot = 312500110n;
+      store.updateLastSignature(walletA, parseTxSignature(SIG_SOL_IN), slot);
+      for (const path of ["/api/wallets", `/api/wallets/${WATCHED_WALLET_A}`]) {
+        const response = await app.request(path);
+        expect(response.status).toBe(200);
+        const data = await response.json();
+        const expected = { lastSlot: slot.toString(), lastRpcSlot: slot.toString() };
+        expect(data).toMatchObject(
+          path === "/api/wallets" ? { wallets: [expected] } : { wallet: expected },
+        );
+      }
+      const patched = await app.request(`/api/wallets/${WATCHED_WALLET_A}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "Updated synthetic wallet" }),
+      });
+      expect(patched.status).toBe(200);
+      expect(await patched.json()).toMatchObject({
+        wallet: {
+          label: "Updated synthetic wallet",
+          lastSlot: slot.toString(),
+          lastRpcSlot: slot.toString(),
+        },
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("exposes minimal /healthz publicly and puts operational status behind /api/status auth", async () => {
     const { app, store } = setupApiTestEnv({ apiToken: "secret-api-token" });
 

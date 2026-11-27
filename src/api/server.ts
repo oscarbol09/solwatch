@@ -12,6 +12,7 @@ import {
   parseWalletAddress,
   type SolanaCluster,
   type WalletAddress,
+  type WatchedWallet,
 } from "../domain/types.js";
 import type { AppLogger } from "../logger.js";
 import { MetricsCollector } from "../observability/metrics.js";
@@ -150,6 +151,14 @@ function serializeRule(rule: AlertRule) {
     includeFailed: rule.includeFailed,
     cooldownSeconds: rule.cooldownSeconds,
     enabled: rule.enabled,
+  };
+}
+
+function serializeWallet(wallet: WatchedWallet) {
+  return {
+    ...wallet,
+    lastSlot: wallet.lastSlot?.toString() ?? null,
+    lastRpcSlot: wallet.lastRpcSlot?.toString() ?? null,
   };
 }
 
@@ -507,7 +516,7 @@ export function createApiApp(options: ApiServerOptions): Hono {
   });
 
   app.get("/api/wallets", (c) => {
-    return c.json({ wallets: options.store.listWallets() });
+    return c.json({ wallets: options.store.listWallets().map(serializeWallet) });
   });
 
   app.get("/api/wallets/:address", (c) => {
@@ -517,7 +526,7 @@ export function createApiApp(options: ApiServerOptions): Hono {
       throw new NotFoundError("Wallet", { address });
     }
     const rules = options.store.listRulesForWallet(address).map(serializeRule);
-    return c.json({ wallet, rules });
+    return c.json({ wallet: serializeWallet(wallet), rules });
   });
 
   app.post("/api/wallets", async (c) => {
@@ -546,7 +555,7 @@ export function createApiApp(options: ApiServerOptions): Hono {
         ? sanitizeControlChars(parsedBody.data.label, 80) || null
         : null;
     const wallet = await options.service.addWallet(address, label);
-    return c.json({ wallet }, 201);
+    return c.json({ wallet: serializeWallet(wallet) }, 201);
   });
 
   app.patch("/api/wallets/:address", async (c) => {
@@ -577,7 +586,7 @@ export function createApiApp(options: ApiServerOptions): Hono {
     if (!updated) {
       throw new NotFoundError("Wallet", { address });
     }
-    return c.json({ wallet: updated });
+    return c.json({ wallet: serializeWallet(updated) });
   });
 
   app.delete("/api/wallets/:address", async (c) => {
