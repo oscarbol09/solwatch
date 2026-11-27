@@ -403,12 +403,12 @@ export function createTelegramBot(options: TelegramBotOptions): Bot {
 
     const grouped = new Map<string, AlertDeliveryRecord[]>();
     for (const row of rows) {
-      const existing = grouped.get(row.signature) ?? [];
-      existing.push(row);
-      grouped.set(row.signature, existing);
       if (grouped.size >= 5 && !grouped.has(row.signature)) {
         break;
       }
+      const existing = grouped.get(row.signature) ?? [];
+      existing.push(row);
+      grouped.set(row.signature, existing);
     }
 
     const lines: string[] = [];
