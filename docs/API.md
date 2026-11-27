@@ -93,7 +93,7 @@ Operational status summary, cluster, active channels, and counters.
 
 ### `GET /api/wallets`
 
-List all tracked wallets.
+List all tracked wallets. Wallet responses encode `lastSlot` and `lastRpcSlot` as decimal strings (or `null` before a cursor is recorded) to preserve integer precision.
 
 - **Auth:** Bearer Token
 - **Response (200 OK):**
@@ -106,6 +106,7 @@ List all tracked wallets.
       "enabled": true,
       "lastSignature": "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW",
       "lastSlot": "312500110",
+      "lastRpcSlot": "312500110",
       "createdAt": "2026-11-23T10:00:00.000Z",
       "updatedAt": "2026-11-23T10:00:00.000Z"
     }
