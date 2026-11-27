@@ -518,6 +518,16 @@ export class MonitorService {
           return { status: "filtered", reason: "wallet_unwatched" };
         }
         this.filteredTotal += 1;
+        this.emitStreamEvent({
+          kind: "tx_filtered",
+          timestampIso: new Date(this.nowMs()).toISOString(),
+          wallet,
+          walletLabel: claim.walletLabel,
+          signature,
+          eventKind: "program_interaction",
+          reason: "failed_tx_suppressed",
+          summary: `Failed transaction ${signature} suppressed`,
+        });
         return { status: "filtered", reason: "failed_tx_suppressed" };
       }
     }
@@ -540,14 +550,7 @@ export class MonitorService {
     }
 
     const event = classifyParsedTransaction(rawTx, wallet);
-    const touchesAtaProgram =
-      rawTx.programIds.includes(ASSOCIATED_TOKEN_PROGRAM) ||
-      (rawTx.meta.innerInstructions?.includes(ASSOCIATED_TOKEN_PROGRAM) ?? false);
-    if (touchesAtaProgram && this.watchControl?.refreshWalletTokenAccounts) {
-      void this.watchControl.refreshWalletTokenAccounts(wallet).catch((err: unknown) => {
-        this.logger.warn({ wallet, err }, "Failed refreshing ATAs after token account creation");
-      });
-    }
+    this.maybeRefreshWalletTokenAccounts(wallet, rawTx);
 
     const source = meta && !meta.advanceRpcCursor ? "backfill" : "websocket";
     return this.applyDedupeRulesAndDispatch(event, meta?.advanceRpcCursor ?? true, signal, source);
@@ -687,6 +690,7 @@ export class MonitorService {
         }
 
         const event = classifyParsedTransaction(rawTx, item.walletAddress);
+        this.maybeRefreshWalletTokenAccounts(item.walletAddress, rawTx);
         await this.applyDedupeRulesAndDispatch(event, item.advanceRpcCursor, signal, item.source);
         resolved += 1;
       }
@@ -695,6 +699,23 @@ export class MonitorService {
     }
 
     return resolved;
+  }
+
+  private maybeRefreshWalletTokenAccounts(
+    wallet: WalletAddress,
+    rawTx: {
+      readonly programIds: readonly string[];
+      readonly meta: { readonly innerInstructions?: readonly string[] | undefined };
+    },
+  ): void {
+    const touchesAtaProgram =
+      rawTx.programIds.includes(ASSOCIATED_TOKEN_PROGRAM) ||
+      (rawTx.meta.innerInstructions?.includes(ASSOCIATED_TOKEN_PROGRAM) ?? false);
+    if (touchesAtaProgram && this.watchControl?.refreshWalletTokenAccounts) {
+      void this.watchControl.refreshWalletTokenAccounts(wallet).catch((err: unknown) => {
+        this.logger.warn({ wallet, err }, "Failed refreshing ATAs after token account creation");
+      });
+    }
   }
 
   runMaintenance(): void {

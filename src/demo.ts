@@ -201,10 +201,7 @@ function parseClusterArg(raw: string | undefined): SolanaCluster {
   return "mainnet-beta";
 }
 
-function createReplayService(options: {
-  readonly cluster: SolanaCluster;
-  readonly minSolLamports: bigint;
-}) {
+function createReplayService(options: { readonly cluster: SolanaCluster }) {
   const store = new SqliteStore(":memory:");
   const logger = createLogger("silent");
   const fixtures = buildDemoFixtures();
@@ -255,7 +252,6 @@ async function runReplayDemo(args: readonly string[]): Promise<void> {
 
   const { store, logger, dispatcher, service } = createReplayService({
     cluster,
-    minSolLamports,
   });
 
   await service.addWallet(TREASURY_WALLET, "Main Treasury");

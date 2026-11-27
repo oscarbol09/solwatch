@@ -491,8 +491,52 @@ describe("SolanaWatcher & KitLogsSubscriptionAdapter", () => {
 
     // Failed initial backfill triggered reconnect attempt 1 and succeeded cleanly without advancing cursor over gap
     expect(watcher.getStatus().reconnectsTotal).toBe(1);
-    expect(watcher.getStatus().backfillTruncatedTotal).toBe(1);
+    expect(watcher.getStatus().backfillTruncatedTotal).toBe(0);
     expect(seen).toEqual([sig2, sig3, sig4, sig5]);
+  });
+
+  it("increments backfillTruncatedTotal only when older signatures exist beyond maxBackfillSignatures", async () => {
+    const store = trackStore(new SqliteStore(":memory:"));
+    store.createWallet(walletA, "Truncated");
+    store.updateLastSignature(walletA, sig1, 100n);
+
+    const subs = createFakeSubscriptionPort();
+    const rpc: SolanaRpcPort = {
+      async getTransaction() {
+        return null;
+      },
+      async getSignaturesForAddress(_addr, opts) {
+        if (!opts?.before) {
+          return [
+            { signature: sig5, slot: 105n, err: null },
+            { signature: sig4, slot: 104n, err: null },
+          ];
+        }
+        return [{ signature: sig3, slot: 103n, err: null }];
+      },
+    };
+
+    const seen: TxSignature[] = [];
+    const watcher = trackWatcher(
+      new SolanaWatcher({
+        subscriptionPort: subs.port,
+        rpcPort: rpc,
+        store,
+        commitment: "confirmed",
+        logger: createLogger("silent"),
+        backoff: { baseMs: 50, maxMs: 100 },
+        maxBackfillSignatures: 2,
+        onSignature: async (_w, sig) => {
+          seen.push(sig);
+        },
+      }),
+    );
+
+    await watcher.start();
+    await vi.waitFor(() => {
+      expect(watcher.getStatus().backfillTruncatedTotal).toBe(1);
+    });
+    expect(seen).toEqual([sig4, sig5]);
   });
 
   it("discovers wallet ATAs dynamically (advanceRpcCursor: false), guards stop/watchWallet race, and bounds queue overflow", async () => {

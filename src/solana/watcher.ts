@@ -518,11 +518,18 @@ export class SolanaWatcher {
       before = oldestInPage.signature;
 
       if (collected.length >= this.maxBackfillSignatures) {
-        this.backfillTruncatedTotal += 1;
-        this.logger.warn(
-          { wallet, limit: this.maxBackfillSignatures, untilSignature },
-          "Catch-up backfill hit maxBackfillSignatures cap",
+        const probe = await this.rpcPort.getSignaturesForAddress(
+          wallet,
+          { until: untilSignature, before, limit: 1 },
+          signal,
         );
+        if (probe.length > 0) {
+          this.backfillTruncatedTotal += 1;
+          this.logger.warn(
+            { wallet, limit: this.maxBackfillSignatures, untilSignature },
+            "Catch-up backfill hit maxBackfillSignatures cap",
+          );
+        }
       }
     }
 
